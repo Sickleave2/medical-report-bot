@@ -1,7 +1,7 @@
 import logging
 import os
 from aiogram import Bot, Dispatcher, executor, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
@@ -17,9 +17,7 @@ dp = Dispatcher(bot, storage=MemoryStorage())
 
 database.init_db()
 
-# ==============================
-# Keyboards
-# ==============================
+# ================= Keyboards =================
 
 def main_keyboard(is_admin=False):
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -33,6 +31,8 @@ def admin_keyboard():
     kb.add("➕ إضافة رصيد", "➖ خصم رصيد")
     kb.add("🚫 حظر مستخدم", "🔓 فك حظر")
     kb.add("👤 معلومات مستخدم")
+    kb.add("📢 إشعار لمستخدم", "📣 إشعار جماعي")
+    kb.add("⚠ الحسابات منخفضة الرصيد")
     kb.add("🔙 رجوع", "❌ إلغاء العملية")
     return kb
 
@@ -41,9 +41,7 @@ def yes_no_keyboard():
     kb.add("✅ نعم", "❌ لا")
     return kb
 
-# ==============================
-# States
-# ==============================
+# ================= States =================
 
 class AddBalance(StatesGroup):
     user_id = State()
@@ -57,14 +55,33 @@ class DeductBalance(StatesGroup):
 
 class BanUser(StatesGroup):
     user_id = State()
-    confirm_notify = State()
 
 class InfoUser(StatesGroup):
     user_id = State()
 
-# ==============================
-# Cancel
-# ==============================
+class NotifyUser(StatesGroup):
+    user_id = State()
+    message = State()
+    confirm = State()
+
+class Broadcast(StatesGroup):
+    message = State()
+    confirm = State()
+
+# ================= Utilities =================
+
+async def check_low_balance(user_id):
+    balance = database.get_balance(user_id)
+    if balance < 3:
+        try:
+            await bot.send_message(
+                user_id,
+                "⚠ رصيدك أوشك على الانتهاء.\nالرجاء إعادة الشحن لإصدار تقاريرك بنجاح ✅"
+            )
+        except:
+            pass
+
+# ================= Cancel =================
 
 @dp.message_handler(lambda m: m.text == "❌ إلغاء العملية", state="*")
 async def cancel_operation(message: types.Message, state: FSMContext):
@@ -74,9 +91,7 @@ async def cancel_operation(message: types.Message, state: FSMContext):
     await state.finish()
     await message.answer("✅ تم إلغاء العملية.", reply_markup=admin_keyboard())
 
-# ==============================
-# Start
-# ==============================
+# ================= Start =================
 
 @dp.message_handler(commands=['start'])
 async def start(message: types.Message):
@@ -91,9 +106,7 @@ async def start(message: types.Message):
         reply_markup=main_keyboard(is_admin)
     )
 
-# ==============================
-# Balance
-# ==============================
+# ================= Balance =================
 
 @dp.message_handler(lambda m: m.text == "💰 رصيدي")
 async def balance_handler(message: types.Message):
@@ -105,9 +118,7 @@ async def balance_handler(message: types.Message):
     balance = database.get_balance(message.from_user.id)
     await message.answer(f"رصيدك الحالي: {balance} ريال")
 
-# ==============================
-# Issue Report
-# ==============================
+# ================= Issue Report =================
 
 @dp.message_handler(lambda m: m.text == "📄 إصدار تقرير")
 async def issue_report(message: types.Message):
@@ -123,10 +134,9 @@ async def issue_report(message: types.Message):
 
     database.update_balance(message.from_user.id, -3, "report")
     await message.answer("✅ تم خصم 3 ريال.\nسيتم إنشاء التقرير.")
+    await check_low_balance(message.from_user.id)
 
-# ==============================
-# Admin Panel
-# ==============================
+# ================= Admin Panel =================
 
 @dp.message_handler(lambda m: m.text == "👑 لوحة المطور")
 async def admin_panel(message: types.Message):
@@ -134,9 +144,7 @@ async def admin_panel(message: types.Message):
         return
     await message.answer("👑 لوحة تحكم المطور", reply_markup=admin_keyboard())
 
-# ==============================
-# Add Balance
-# ==============================
+# ================= Add Balance =================
 
 @dp.message_handler(lambda m: m.text == "➕ إضافة رصيد")
 async def add_balance_start(message: types.Message):
@@ -178,16 +186,17 @@ async def add_balance_confirm(message: types.Message, state: FSMContext):
 
     if message.text == "✅ نعم":
         try:
-            await bot.send_message(user_id, f"💰 تم إضافة {amount} ريال إلى حسابك.\nرصيدك الحالي: {database.get_balance(user_id)} ريال")
+            await bot.send_message(
+                user_id,
+                f"💰 تم إضافة {amount} ريال إلى حسابك.\nرصيدك الحالي: {database.get_balance(user_id)} ريال"
+            )
         except:
             pass
 
     await message.answer("✅ تم تنفيذ العملية.", reply_markup=admin_keyboard())
     await state.finish()
 
-# ==============================
-# Deduct Balance
-# ==============================
+# ================= Deduct Balance =================
 
 @dp.message_handler(lambda m: m.text == "➖ خصم رصيد")
 async def deduct_balance_start(message: types.Message):
@@ -229,16 +238,17 @@ async def deduct_balance_confirm(message: types.Message, state: FSMContext):
 
     if message.text == "✅ نعم":
         try:
-            await bot.send_message(user_id, f"⚠ تم خصم {amount} ريال من حسابك.\nرصيدك الحالي: {database.get_balance(user_id)} ريال")
+            await bot.send_message(
+                user_id,
+                f"⚠ تم خصم {amount} ريال من حسابك.\nرصيدك الحالي: {database.get_balance(user_id)} ريال"
+            )
         except:
             pass
 
     await message.answer("✅ تم تنفيذ العملية.", reply_markup=admin_keyboard())
     await state.finish()
 
-# ==============================
-# Ban / Unban
-# ==============================
+# ================= Ban / Unban =================
 
 @dp.message_handler(lambda m: m.text == "🚫 حظر مستخدم")
 async def ban_start(message: types.Message):
@@ -291,9 +301,7 @@ async def unban_execute(message: types.Message, state: FSMContext):
     await message.answer("✅ تم فك الحظر وإرسال إشعار.", reply_markup=admin_keyboard())
     await state.finish()
 
-# ==============================
-# User Info
-# ==============================
+# ================= User Info =================
 
 @dp.message_handler(lambda m: m.text == "👤 معلومات مستخدم")
 async def info_user_start(message: types.Message):
@@ -308,28 +316,120 @@ async def info_user_execute(message: types.Message, state: FSMContext):
         await message.answer("❌ آيدي غير صحيح.")
         return
 
-    user = database.get_user(int(message.text))
+    user_id = int(message.text)
+    user = database.get_user(user_id)
     if not user:
         await message.answer("المستخدم غير موجود.")
         await state.finish()
         return
 
-    balance = database.get_balance(int(message.text))
+    balance = database.get_balance(user_id)
     status = "محظور 🚫" if user[5] == 1 else "نشط ✅"
+    last_tx = database.get_last_transaction(user_id)
+
+    tx_text = "لا توجد عمليات."
+    if last_tx:
+        tx_text = f"{last_tx[1]} | {last_tx[0]} | {last_tx[2]}"
 
     await message.answer(
         f"👤 معلومات المستخدم:\n\n"
-        f"🆔 ID: {user[1]}\n"
+        f"🆔 ID: {user_id}\n"
         f"💰 الرصيد: {balance}\n"
         f"📌 الحالة: {status}\n"
+        f"🧾 آخر عملية: {tx_text}\n"
         f"📅 تاريخ التسجيل: {user[6]}",
         reply_markup=admin_keyboard()
     )
     await state.finish()
 
-# ==============================
-# Back
-# ==============================
+# ================= Notify Single =================
+
+@dp.message_handler(lambda m: m.text == "📢 إشعار لمستخدم")
+async def notify_user_start(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    await message.answer("أرسل آيدي المستخدم:")
+    await NotifyUser.user_id.set()
+
+@dp.message_handler(state=NotifyUser.user_id)
+async def notify_user_get_id(message: types.Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("❌ آيدي غير صحيح.")
+        return
+    await state.update_data(user_id=int(message.text))
+    await message.answer("أرسل نص الرسالة:")
+    await NotifyUser.message.set()
+
+@dp.message_handler(state=NotifyUser.message)
+async def notify_user_message(message: types.Message, state: FSMContext):
+    await state.update_data(text=message.text)
+    await message.answer("هل تريد إرسال الإشعار؟", reply_markup=yes_no_keyboard())
+    await NotifyUser.confirm.set()
+
+@dp.message_handler(state=NotifyUser.confirm)
+async def notify_user_confirm(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    if message.text == "✅ نعم":
+        try:
+            await bot.send_message(data["user_id"], data["text"])
+        except:
+            pass
+        await message.answer("✅ تم إرسال الإشعار.", reply_markup=admin_keyboard())
+    else:
+        await message.answer("❌ تم إلغاء الإرسال.", reply_markup=admin_keyboard())
+    await state.finish()
+
+# ================= Broadcast =================
+
+@dp.message_handler(lambda m: m.text == "📣 إشعار جماعي")
+async def broadcast_start(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    await message.answer("أرسل نص الرسالة الجماعية:")
+    await Broadcast.message.set()
+
+@dp.message_handler(state=Broadcast.message)
+async def broadcast_message(message: types.Message, state: FSMContext):
+    await state.update_data(text=message.text)
+    await message.answer("هل تريد إرسال الإشعار لكل المستخدمين النشطين؟", reply_markup=yes_no_keyboard())
+    await Broadcast.confirm.set()
+
+@dp.message_handler(state=Broadcast.confirm)
+async def broadcast_confirm(message: types.Message, state: FSMContext):
+    if message.text == "✅ نعم":
+        data = await state.get_data()
+        users = database.get_all_active_users()
+        count = 0
+        for user_id in users:
+            try:
+                await bot.send_message(user_id, data["text"])
+                count += 1
+            except:
+                pass
+        await message.answer(f"✅ تم الإرسال إلى {count} مستخدم.", reply_markup=admin_keyboard())
+    else:
+        await message.answer("❌ تم إلغاء العملية.", reply_markup=admin_keyboard())
+    await state.finish()
+
+# ================= Low Balance List =================
+
+@dp.message_handler(lambda m: m.text == "⚠ الحسابات منخفضة الرصيد")
+async def low_balance_users(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+
+    users = database.get_low_balance_users()
+    if not users:
+        await message.answer("لا يوجد حسابات منخفضة الرصيد.", reply_markup=admin_keyboard())
+        return
+
+    text = "⚠ الحسابات منخفضة الرصيد:\n\n"
+    for u in users:
+        text += f"🆔 {u[0]} | 💰 {u[1]}\n"
+
+    await message.answer(text, reply_markup=admin_keyboard())
+
+# ================= Back =================
 
 @dp.message_handler(lambda m: m.text == "🔙 رجوع", state="*")
 async def back_main(message: types.Message, state: FSMContext):
