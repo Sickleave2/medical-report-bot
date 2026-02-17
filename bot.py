@@ -1,40 +1,257 @@
+import logging
 import os
 from aiogram import Bot, Dispatcher, executor, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+
 import database
+
+# ================== إعدادات ==================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = str(os.getenv("ADMIN_ID")).strip()
+REPORT_PRICE = 3
+
+logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
 database.init_db()
 
-# ---------------- START ----------------
+# ================== Keyboards ==================
 
-@dp.message_handler(commands=['start'])
-async def start(message: types.Message):
-    database.add_user(message.from_user.id, message.from_user.username)
-    await message.answer("👋 أهلاً بك في نظام التقارير الطبية.\nاختر من القائمة:",
-                         reply_markup=main_menu())
-
-def main_menu():
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("📄 إصدار تقرير", callback_data="issue_report"))
+def main_keyboard(is_admin=False):
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("💰 رصيدي", "📄 إصدار تقرير")
+    if is_admin:
+        kb.add("👑 لوحة المطور")
     return kb
 
-# ---------------- إصدار تقرير ----------------
+def admin_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("➕ إضافة مستشفى")
+    kb.add("➕ إضافة قسم")
+    kb.add("➕ إضافة طبيب")
+    kb.add("🔙 رجوع")
+    return kb
 
-@dp.callback_query_handler(lambda c: c.data == "issue_report")
-async def choose_hospital(call: types.CallbackQuery):
-    hospitals = database.get_hospitals()
+# ================== States ==================
 
-    if not hospitals:
-        await call.message.edit_text("لا يوجد مستشفيات حالياً.")
+class AddHospital(StatesGroup):
+    name = State()
+
+class AddDepartment(StatesGroup):
+    hospital = State()
+    name = State()
+
+class AddDoctor(StatesGroup):
+    hospital = State()
+    department = State()
+    name = State()
+    specialty = State()
+    license = State()
+
+class ReportFlow(StatesGroup):
+    hospital = State()
+    department = State()
+    doctor = State()
+
+# ================== Start ==================
+
+@dp.message_handler(commands=["start"])
+async def start_handler(message: types.Message):
+    user_id = message.from_user.id
+    username = message.from_user.username or "NoUsername"
+
+    database.init_db()
+
+    is_admin = str(user_id) == ADMIN_ID
+    await message.answer(
+        "أهلاً بك في نظام التقارير الطبية 👨‍⚕️",
+        reply_markup=main_keyboard(is_admin)
+    )
+
+# ================== رصيدي ==================
+
+@dp.message_handler(lambda m: m.text == "💰 رصيدي")
+async def balance_handler(message: types.Message):
+    bal = database.get_balance(message.from_user.id)
+    await message.answer(f"رصيدك الحالي: {bal} ريال")
+
+# ================== لوحة المطور ==================
+
+@dp.message_handler(lambda m: m.text == "👑 لوحة المطور")
+async def admin_panel(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    await message.answer("لوحة التحكم 👑", reply_markup=admin_keyboard())
+
+# ================== إضافة مستشفى ==================
+
+@dp.message_handler(lambda m: m.text == "➕ إضافة مستشفى")
+async def add_hospital_start(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    await message.answer("أرسل اسم المستشفى:")
+    await AddHospital.name.set()
+
+@dp.message_handler(state=AddHospital.name)
+async def save_hospital(message: types.Message, state: FSMContext):
+    database.add_hospital(message.text)
+    await message.answer("✅ تم إضافة المستشفى.", reply_markup=admin_keyboard())
+    await state.finish()
+
+# ================== إضافة قسم ==================
+
+@dp.message_handler(lambda m: m.text == "➕ إضافة قسم")
+async def add_department_start(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
         return
 
+    hospitals = database.get_hospitals()
+    if not hospitals:
+        await message.answer("لا يوجد مستشفيات أولاً.")
+        return
+
+    kb = InlineKeyboardMarkup()
+    for h in hospitals:
+        kb.add(InlineKeyboardButton(h[1], callback_data=f"adddept_{h[0]}"))
+
+    await message.answer("اختر المستشفى:", reply_markup=kb)
+    await AddDepartment.hospital.set()
+
+@dp.callback_query_handler(lambda c: c.data.startswith("adddept_"), state=AddDepartment.hospital)
+async def choose_hospital_for_dept(callback: types.CallbackQuery, state: FSMContext):
+    hospital_id = int(callback.data.split("_")[1])
+    await state.update_data(hospital_id=hospital_id)
+    await callback.message.answer("أرسل اسم القسم:")
+    await AddDepartment.name.set()
+
+@dp.message_handler(state=AddDepartment.name)
+async def save_department(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    database.add_department(data["hospital_id"], message.text)
+    await message.answer("✅ تم إضافة القسم.", reply_markup=admin_keyboard())
+    await state.finish()
+
+# ================== إضافة طبيب ==================
+
+@dp.message_handler(lambda m: m.text == "➕ إضافة طبيب")
+async def add_doctor_start(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+
+    hospitals = database.get_hospitals()
+    kb = InlineKeyboardMarkup()
+    for h in hospitals:
+        kb.add(InlineKeyboardButton(h[1], callback_data=f"adddoc_{h[0]}"))
+
+    await message.answer("اختر المستشفى:", reply_markup=kb)
+    await AddDoctor.hospital.set()
+
+@dp.callback_query_handler(lambda c: c.data.startswith("adddoc_"), state=AddDoctor.hospital)
+async def choose_hospital_for_doc(callback: types.CallbackQuery, state: FSMContext):
+    hospital_id = int(callback.data.split("_")[1])
+    await state.update_data(hospital_id=hospital_id)
+
+    departments = database.get_departments(hospital_id)
+    kb = InlineKeyboardMarkup()
+    for d in departments:
+        kb.add(InlineKeyboardButton(d[2], callback_data=f"docdept_{d[0]}"))
+
+    await callback.message.answer("اختر القسم:", reply_markup=kb)
+    await AddDoctor.department.set()
+
+@dp.callback_query_handler(lambda c: c.data.startswith("docdept_"), state=AddDoctor.department)
+async def choose_department_for_doc(callback: types.CallbackQuery, state: FSMContext):
+    department_id = int(callback.data.split("_")[1])
+    await state.update_data(department_id=department_id)
+    await callback.message.answer("أرسل اسم الطبيب:")
+    await AddDoctor.name.set()
+
+@dp.message_handler(state=AddDoctor.name)
+async def doctor_name(message: types.Message, state: FSMContext):
+    await state.update_data(name=message.text)
+    await message.answer("أرسل التخصص:")
+    await AddDoctor.specialty.set()
+
+@dp.message_handler(state=AddDoctor.specialty)
+async def doctor_specialty(message: types.Message, state: FSMContext):
+    await state.update_data(specialty=message.text)
+    await message.answer("أرسل رقم الرخصة:")
+    await AddDoctor.license.set()
+
+@dp.message_handler(state=AddDoctor.license)
+async def doctor_license(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    database.add_doctor(
+        data["hospital_id"],
+        data["department_id"],
+        data["name"],
+        data["specialty"],
+        message.text
+    )
+    await message.answer("✅ تم إضافة الطبيب.", reply_markup=admin_keyboard())
+    await state.finish()
+
+# ================== إصدار تقرير ==================
+
+@dp.message_handler(lambda m: m.text == "📄 إصدار تقرير")
+async def issue_report(message: types.Message):
+    bal = database.get_balance(message.from_user.id)
+    if bal < REPORT_PRICE:
+        await message.answer("❌ رصيدك غير كافي.")
+        return
+
+    hospitals = database.get_hospitals()
+    kb = InlineKeyboardMarkup()
+    for h in hospitals:
+        kb.add(InlineKeyboardButton(h[1], callback_data=f"hospital_{h[0]}"))
+
+    await message.answer("اختر المستشفى:", reply_markup=kb)
+    await ReportFlow.hospital.set()
+
+@dp.callback_query_handler(lambda c: c.data.startswith("hospital_"), state=ReportFlow.hospital)
+async def select_hospital(callback: types.CallbackQuery, state: FSMContext):
+    hospital_id = int(callback.data.split("_")[1])
+    await state.update_data(hospital_id=hospital_id)
+
+    departments = database.get_departments(hospital_id)
+    kb = InlineKeyboardMarkup()
+    for d in departments:
+        kb.add(InlineKeyboardButton(d[2], callback_data=f"dept_{d[0]}"))
+
+    await callback.message.edit_text("اختر القسم:", reply_markup=kb)
+    await ReportFlow.department.set()
+
+@dp.callback_query_handler(lambda c: c.data.startswith("dept_"), state=ReportFlow.department)
+async def select_department(callback: types.CallbackQuery, state: FSMContext):
+    department_id = int(callback.data.split("_")[1])
+    data = await state.get_data()
+    hospital_id = data["hospital_id"]
+
+    await state.update_data(department_id=department_id)
+
+    doctors = database.get_doctors(hospital_id, department_id)
+    kb = InlineKeyboardMarkup()
+    for doc in doctors:
+        kb.add(InlineKeyboardButton(doc[3], callback_data=f"doctor_{doc[0]}"))
+
+    await callback.message.edit_text("اختر الطبيب:", reply_markup=kb)
+    await ReportFlow.doctor.set()
+
+@dp.callback_query_handler(lambda c: c.data.startswith("doctor_"), state=ReportFlow.doctor)
+async def select_doctor(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("✅ تم اختيار الطبيب.\nسيتم ربطه بمرحلة PDF قريباً.")
+    await state.finish()
+
+# ================== تشغيل ==================
+
+if __name__ == "__main__":
+    executor.start_polling(dp, skip_updates=True)
     kb = InlineKeyboardMarkup()
     for h in hospitals:
         kb.add(InlineKeyboardButton(h[1], callback_data=f"hospital_{h[0]}"))
