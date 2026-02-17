@@ -1,40 +1,100 @@
-import logging
 import os
 from aiogram import Bot, Dispatcher, executor, types
-from aiogram.types import ReplyKeyboardMarkup
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 import database
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = str(os.getenv("ADMIN_ID")).strip()
 
-logging.basicConfig(level=logging.INFO)
-
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
 database.init_db()
 
-# ================= Keyboards =================
+# ---------------- START ----------------
 
-def main_keyboard(is_admin=False):
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("💰 رصيدي", "📄 إصدار تقرير")
-    if is_admin:
-        kb.add("👑 لوحة المطور")
+@dp.message_handler(commands=['start'])
+async def start(message: types.Message):
+    database.add_user(message.from_user.id, message.from_user.username)
+    await message.answer("👋 أهلاً بك في نظام التقارير الطبية.\nاختر من القائمة:",
+                         reply_markup=main_menu())
+
+def main_menu():
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("📄 إصدار تقرير", callback_data="issue_report"))
     return kb
 
-def admin_keyboard():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("➕ إضافة رصيد", "➖ خصم رصيد")
-    kb.add("🚫 حظر مستخدم", "🔓 فك حظر")
-    kb.add("👤 معلومات مستخدم")
-    kb.add("📢 إشعار لمستخدم", "📣 إشعار جماعي")
-    kb.add("⚠ الحسابات منخفضة الرصيد")
-    kb.add("🔙 رجوع", "❌ إلغاء العملية")
-    return kb
+# ---------------- إصدار تقرير ----------------
+
+@dp.callback_query_handler(lambda c: c.data == "issue_report")
+async def choose_hospital(call: types.CallbackQuery):
+    hospitals = database.get_hospitals()
+
+    if not hospitals:
+        await call.message.edit_text("لا يوجد مستشفيات حالياً.")
+        return
+
+    kb = InlineKeyboardMarkup()
+    for h in hospitals:
+        kb.add(InlineKeyboardButton(h[1], callback_data=f"hospital_{h[0]}"))
+
+    await call.message.edit_text("🏥 اختر المستشفى:", reply_markup=kb)
+
+# ---------------- اختيار قسم ----------------
+
+@dp.callback_query_handler(lambda c: c.data.startswith("hospital_"))
+async def choose_department(call: types.CallbackQuery):
+    hospital_id = int(call.data.split("_")[1])
+    departments = database.get_departments(hospital_id)
+
+    if not departments:
+        await call.message.edit_text("لا يوجد أقسام حالياً.")
+        return
+
+    kb = InlineKeyboardMarkup()
+    for d in departments:
+        kb.add(InlineKeyboardButton(d[1],
+               callback_data=f"department_{hospital_id}_{d[0]}"))
+
+    await call.message.edit_text("🏢 اختر القسم:", reply_markup=kb)
+
+# ---------------- اختيار طبيب ----------------
+
+@dp.callback_query_handler(lambda c: c.data.startswith("department_"))
+async def choose_doctor(call: types.CallbackQuery):
+    parts = call.data.split("_")
+    hospital_id = int(parts[1])
+    department_id = int(parts[2])
+
+    doctors = database.get_doctors(hospital_id, department_id)
+
+    if not doctors:
+        await call.message.edit_text("لا يوجد أطباء حالياً.")
+        return
+
+    kb = InlineKeyboardMarkup()
+    for doc in doctors:
+        kb.add(InlineKeyboardButton(
+            f"{doc[1]} - {doc[2]}",
+            callback_data=f"doctor_{doc[0]}"
+        ))
+
+    await call.message.edit_text("👨‍⚕️ اختر الطبيب:", reply_markup=kb)
+
+# ---------------- اختيار طبيب نهائي ----------------
+
+@dp.callback_query_handler(lambda c: c.data.startswith("doctor_"))
+async def doctor_selected(call: types.CallbackQuery):
+    doctor_id = int(call.data.split("_")[1])
+    await call.message.edit_text(
+        f"✅ تم اختيار الطبيب رقم {doctor_id}\n\n(الخطوة التالية: إدخال بيانات المريض — سنبنيها الآن)"
+    )
+
+# ---------------- تشغيل ----------------
+
+if __name__ == "__main__":
+    executor.start_polling(dp, skip_updates=True)    return kb
 
 def yes_no_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
