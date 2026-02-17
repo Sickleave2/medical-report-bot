@@ -488,7 +488,88 @@ async def low_balance_users(message: types.Message):
         text += f"🆔 {u[0]} | 💰 {u[1]}\n"
 
     await message.answer(text, reply_markup=admin_keyboard())
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.dispatcher.filters.state import State, StatesGroup
 
+class ReportFlow(StatesGroup):
+    hospital = State()
+    department = State()
+    doctor = State()
+
+
+# =============== إصدار تقرير ===============
+
+@dp.message_handler(lambda m: m.text == "📄 إصدار تقرير")
+async def issue_report_start(message: types.Message):
+    hospitals = database.get_hospitals()
+
+    if not hospitals:
+        await message.answer("لا يوجد مستشفيات حالياً.")
+        return
+
+    kb = InlineKeyboardMarkup()
+    for h in hospitals:
+        kb.add(InlineKeyboardButton(h[1], callback_data=f"hospital_{h[0]}"))
+
+    await message.answer("اختر المستشفى:", reply_markup=kb)
+    await ReportFlow.hospital.set()
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("hospital_"), state=ReportFlow.hospital)
+async def select_hospital(callback: types.CallbackQuery, state: FSMContext):
+    hospital_id = int(callback.data.split("_")[1])
+    await state.update_data(hospital_id=hospital_id)
+
+    departments = database.get_departments(hospital_id)
+
+    if not departments:
+        await callback.message.edit_text("لا يوجد أقسام لهذا المستشفى.")
+        await state.finish()
+        return
+
+    kb = InlineKeyboardMarkup()
+    for d in departments:
+        kb.add(InlineKeyboardButton(d[2], callback_data=f"dept_{d[0]}"))
+
+    await callback.message.edit_text("اختر القسم:", reply_markup=kb)
+    await ReportFlow.department.set()
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("dept_"), state=ReportFlow.department)
+async def select_department(callback: types.CallbackQuery, state: FSMContext):
+    department_id = int(callback.data.split("_")[1])
+    data = await state.get_data()
+    hospital_id = data["hospital_id"]
+
+    await state.update_data(department_id=department_id)
+
+    doctors = database.get_doctors(hospital_id, department_id)
+
+    if not doctors:
+        await callback.message.edit_text("لا يوجد أطباء في هذا القسم.")
+        await state.finish()
+        return
+
+    kb = InlineKeyboardMarkup()
+    for doc in doctors:
+        kb.add(
+            InlineKeyboardButton(
+                f"{doc[3]} - {doc[4]}",
+                callback_data=f"doctor_{doc[0]}"
+            )
+        )
+
+    await callback.message.edit_text("اختر الطبيب:", reply_markup=kb)
+    await ReportFlow.doctor.set()
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("doctor_"), state=ReportFlow.doctor)
+async def select_doctor(callback: types.CallbackQuery, state: FSMContext):
+    doctor_id = int(callback.data.split("_")[1])
+    await state.update_data(doctor_id=doctor_id)
+
+    await callback.message.edit_text("✅ تم اختيار الطبيب.\nسيتم ربطه بنظام التقرير لاحقاً.")
+    await state.finish()
 # ================= Back =================
 
 @dp.message_handler(lambda m: m.text == "🔙 رجوع", state="*")
