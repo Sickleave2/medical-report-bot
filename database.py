@@ -10,119 +10,160 @@ def init_db():
     conn = connect()
     cursor = conn.cursor()
 
+    # users
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         telegram_id INTEGER UNIQUE,
         username TEXT,
         balance REAL DEFAULT 0,
-        is_admin INTEGER DEFAULT 0,
         is_banned INTEGER DEFAULT 0,
         created_at TEXT
     )
     """)
 
+    # transactions
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS transactions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        telegram_id INTEGER,
+        user_id INTEGER,
         amount REAL,
         type TEXT,
         created_at TEXT
     )
     """)
 
+    # hospitals
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS hospitals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT
+    )
+    """)
+
+    # departments
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS departments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        hospital_id INTEGER,
+        name TEXT
+    )
+    """)
+
+    # doctors
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS doctors (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        hospital_id INTEGER,
+        department_id INTEGER,
+        name TEXT,
+        specialty TEXT,
+        license_number TEXT
+    )
+    """)
+
+    # reports
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        hospital_id INTEGER,
+        department_id INTEGER,
+        doctor_id INTEGER,
+        patient_name TEXT,
+        diagnosis TEXT,
+        created_at TEXT
+    )
+    """)
+
     conn.commit()
     conn.close()
 
+
 # ---------------- Users ----------------
 
-def add_user(telegram_id, username, is_admin=0):
+def add_user(telegram_id, username):
     conn = connect()
     cursor = conn.cursor()
     cursor.execute("""
     INSERT OR IGNORE INTO users
-    (telegram_id, username, is_admin, created_at)
-    VALUES (?, ?, ?, ?)
-    """, (telegram_id, username, is_admin, datetime.now()))
+    (telegram_id, username, created_at)
+    VALUES (?, ?, ?)
+    """, (telegram_id, username, datetime.now().isoformat()))
     conn.commit()
     conn.close()
-
-def get_user(telegram_id):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE telegram_id=?", (telegram_id,))
-    user = cursor.fetchone()
-    conn.close()
-    return user
 
 def get_balance(telegram_id):
     conn = connect()
     cursor = conn.cursor()
     cursor.execute("SELECT balance FROM users WHERE telegram_id=?", (telegram_id,))
-    result = cursor.fetchone()
+    row = cursor.fetchone()
     conn.close()
-    return result[0] if result else 0
+    return row[0] if row else 0
 
-def update_balance(telegram_id, amount, tx_type):
+
+# ---------------- Hospitals ----------------
+
+def add_hospital(name):
     conn = connect()
     cursor = conn.cursor()
-
-    cursor.execute(
-        "UPDATE users SET balance = balance + ? WHERE telegram_id=?",
-        (amount, telegram_id)
-    )
-
-    cursor.execute(
-        "INSERT INTO transactions (telegram_id, amount, type, created_at) VALUES (?, ?, ?, ?)",
-        (telegram_id, amount, tx_type, datetime.now())
-    )
-
+    cursor.execute("INSERT INTO hospitals (name) VALUES (?)", (name,))
     conn.commit()
     conn.close()
 
-def ban_user(telegram_id, status):
+def get_hospitals():
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name FROM hospitals")
+    data = cursor.fetchall()
+    conn.close()
+    return data
+
+
+# ---------------- Departments ----------------
+
+def add_department(hospital_id, name):
     conn = connect()
     cursor = conn.cursor()
     cursor.execute(
-        "UPDATE users SET is_banned=? WHERE telegram_id=?",
-        (status, telegram_id)
+        "INSERT INTO departments (hospital_id, name) VALUES (?, ?)",
+        (hospital_id, name)
     )
     conn.commit()
     conn.close()
 
-# ---------------- Queries ----------------
-
-def get_all_active_users():
+def get_departments(hospital_id):
     conn = connect()
     cursor = conn.cursor()
-    cursor.execute("SELECT telegram_id FROM users WHERE is_banned=0")
-    users = cursor.fetchall()
+    cursor.execute(
+        "SELECT id, name FROM departments WHERE hospital_id=?",
+        (hospital_id,)
+    )
+    data = cursor.fetchall()
     conn.close()
-    return [u[0] for u in users]
+    return data
 
-def get_low_balance_users(limit=3):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT telegram_id, balance
-        FROM users
-        WHERE balance < ? AND is_banned=0
-    """, (limit,))
-    users = cursor.fetchall()
-    conn.close()
-    return users
 
-def get_last_transaction(telegram_id):
+# ---------------- Doctors ----------------
+
+def add_doctor(hospital_id, department_id, name, specialty, license_number):
     conn = connect()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT amount, type, created_at
-        FROM transactions
-        WHERE telegram_id=?
-        ORDER BY id DESC
-        LIMIT 1
-    """, (telegram_id,))
-    tx = cursor.fetchone()
+        INSERT INTO doctors
+        (hospital_id, department_id, name, specialty, license_number)
+        VALUES (?, ?, ?, ?, ?)
+    """, (hospital_id, department_id, name, specialty, license_number))
+    conn.commit()
     conn.close()
-    return tx
+
+def get_doctors(hospital_id, department_id):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, name, specialty FROM doctors
+        WHERE hospital_id=? AND department_id=?
+    """, (hospital_id, department_id))
+    data = cursor.fetchall()
+    conn.close()
+    return data
