@@ -68,6 +68,12 @@ class Broadcast(StatesGroup):
     message = State()
     confirm = State()
 
+class CreateReport(StatesGroup):  # جديد
+    choose_hospital = State()
+    choose_department = State()
+    choose_doctor = State()
+    patient_name = State()
+
 # ================= Utilities =================
 
 async def check_low_balance(user_id):
@@ -118,10 +124,9 @@ async def balance_handler(message: types.Message):
     balance = database.get_balance(message.from_user.id)
     await message.answer(f"رصيدك الحالي: {balance} ريال")
 
-# ================= Issue Report =================
-
+# ================= Issue Report ================= (محدث)
 @dp.message_handler(lambda m: m.text == "📄 إصدار تقرير")
-async def issue_report(message: types.Message):
+async def start_report(message: types.Message):
     user = database.get_user(message.from_user.id)
     if user and user[5] == 1:
         await message.answer("🚫 حسابك محظور.")
@@ -132,9 +137,134 @@ async def issue_report(message: types.Message):
         await message.answer("❌ رصيدك غير كافي.\nالرجاء إعادة الشحن لإصدار تقاريرك بنجاح ✅")
         return
 
-    database.update_balance(message.from_user.id, -3, "report")
-    await message.answer("✅ تم خصم 3 ريال.\nسيتم إنشاء التقرير.")
-    await check_low_balance(message.from_user.id)
+    hospitals = database.get_hospitals()
+    if not hospitals:
+        await message.answer("لا توجد مستشفيات مسجلة حالياً، يرجى التواصل مع المطور.")
+        return
+
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    for h in hospitals:
+        kb.add(f"🏥 {h[1]}")
+    kb.add("❌ إلغاء العملية")
+
+    await message.answer("اختر المستشفى:", reply_markup=kb)
+    await CreateReport.choose_hospital.set()
+
+@dp.message_handler(state=CreateReport.choose_hospital)
+async def choose_department(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await state.finish()
+        await message.answer("تم الإلغاء.", reply_markup=main_keyboard(str(message.from_user.id) == ADMIN_ID))
+        return
+
+    hospital_name = message.text.replace("🏥 ", "")
+    hospitals = database.get_hospitals()
+    hospital_id = None
+    for h in hospitals:
+        if h[1] == hospital_name:
+            hospital_id = h[0]
+            break
+
+    if not hospital_id:
+        await message.answer("❌ اختيار غير صحيح، حاول مرة أخرى.")
+        return
+
+    await state.update_data(hospital_id=hospital_id, hospital_name=hospital_name)
+
+    departments = database.get_departments(hospital_id)
+    if not departments:
+        await message.answer("لا توجد أقسام في هذا المستشفى.")
+        await state.finish()
+        return
+
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    for d in departments:
+        kb.add(f"🩺 {d[2]}")
+    kb.add("❌ إلغاء العملية")
+
+    await message.answer("اختر القسم:", reply_markup=kb)
+    await CreateReport.choose_department.set()
+
+@dp.message_handler(state=CreateReport.choose_department)
+async def choose_doctor(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await state.finish()
+        await message.answer("تم الإلغاء.", reply_markup=main_keyboard(str(message.from_user.id) == ADMIN_ID))
+        return
+
+    department_name = message.text.replace("🩺 ", "")
+    data = await state.get_data()
+    departments = database.get_departments(data["hospital_id"])
+
+    department_id = None
+    for d in departments:
+        if d[2] == department_name:
+            department_id = d[0]
+            break
+
+    if not department_id:
+        await message.answer("❌ اختيار غير صحيح.")
+        return
+
+    doctors = database.get_doctors(department_id)
+    if not doctors:
+        await message.answer("لا يوجد أطباء في هذا القسم.")
+        await state.finish()
+        return
+
+    await state.update_data(department_id=department_id)
+
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    for doc in doctors:
+        kb.add(f"👨‍⚕️ {doc[3]}")
+    kb.add("❌ إلغاء العملية")
+
+    await message.answer("اختر الطبيب:", reply_markup=kb)
+    await CreateReport.choose_doctor.set()
+
+@dp.message_handler(state=CreateReport.choose_doctor)
+async def enter_patient_name(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await state.finish()
+        await message.answer("تم الإلغاء.", reply_markup=main_keyboard(str(message.from_user.id) == ADMIN_ID))
+        return
+
+    doctor_name = message.text.replace("👨‍⚕️ ", "")
+    await state.update_data(doctor_name=doctor_name)
+
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("❌ إلغاء العملية")
+
+    await message.answer("أدخل اسم المريض:", reply_markup=kb)
+    await CreateReport.patient_name.set()
+
+@dp.message_handler(state=CreateReport.patient_name)
+async def generate_report(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await state.finish()
+        await message.answer("تم الإلغاء.", reply_markup=main_keyboard(str(message.from_user.id) == ADMIN_ID))
+        return
+
+    patient_name = message.text
+    data = await state.get_data()
+    user_id = message.from_user.id
+
+    # خصم الرصيد
+    database.update_balance(user_id, -3, "report")
+
+    # حفظ التقرير في قاعدة البيانات
+    database.save_report(user_id, data["hospital_name"], data["doctor_name"], patient_name)
+
+    await message.answer(
+        f"✅ تم إنشاء التقرير بنجاح\n\n"
+        f"🏥 المستشفى: {data['hospital_name']}\n"
+        f"👨‍⚕️ الطبيب: {data['doctor_name']}\n"
+        f"👤 المريض: {patient_name}",
+        reply_markup=main_keyboard(str(user_id) == ADMIN_ID)
+    )
+
+    await check_low_balance(user_id)
+    await state.finish()
 
 # ================= Admin Panel =================
 
