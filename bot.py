@@ -16,6 +16,22 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
 database.init_db()
+# إضافة بيانات تجريبية أول مرة فقط
+if not database.get_hospitals():
+    database.add_hospital("مستشفى السعودي الألماني")
+    hospitals = database.get_hospitals()
+    hospital_id = hospitals[0][0]
+
+    database.add_department(hospital_id, "الطب الباطني")
+    departments = database.get_departments(hospital_id)
+    department_id = departments[0][0]
+
+    database.add_doctor(
+        hospital_id,
+        department_id,
+        "د. وليد شهاب الدين",
+        "استشاري باطنية"
+    )
 
 # ================= Keyboards =================
 
