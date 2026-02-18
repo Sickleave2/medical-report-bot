@@ -10,7 +10,7 @@ def init_db():
     conn = connect()
     cursor = conn.cursor()
 
-    # جدول المستخدمين
+    # المستخدمين
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -23,7 +23,7 @@ def init_db():
     )
     """)
 
-    # جدول المعاملات
+    # المعاملات
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS transactions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,7 +34,7 @@ def init_db():
     )
     """)
 
-    # جدول المناطق (جديد)
+    # المناطق
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS regions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,7 +42,7 @@ def init_db():
     )
     """)
 
-    # جدول المستشفيات (مرتبط بالمنطقة)
+    # المستشفيات (مرتبطة بالمنطقة)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS hospitals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,7 +52,7 @@ def init_db():
     )
     """)
 
-    # جدول الأقسام (مرتبط بالمستشفى)
+    # الأقسام (مرتبطة بالمستشفى)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS departments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,20 +62,20 @@ def init_db():
     )
     """)
 
-    # جدول الأطباء (مرتبط بالقسم، مع مسارات PDF للذكر والأنثى)
+    # الأطباء (مرتبط بالقسم، مع ملفات PDF للذكر والأنثى)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS doctors (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         department_id INTEGER,
         name TEXT,
         specialization TEXT,
-        pdf_male TEXT,
-        pdf_female TEXT,
+        pdf_male TEXT,   -- file_id من تليجرام
+        pdf_female TEXT, -- file_id من تليجرام
         FOREIGN KEY(department_id) REFERENCES departments(id)
     )
     """)
 
-    # جدول التقارير المحفوظة
+    # التقارير
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS reports (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,8 +90,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# ================= Users =================
-
+# -------------------- المستخدمين --------------------
 def add_user(telegram_id, username, is_admin=0):
     conn = connect()
     cursor = conn.cursor()
@@ -143,8 +142,7 @@ def ban_user(telegram_id, status):
     conn.commit()
     conn.close()
 
-# ================= Queries =================
-
+# -------------------- الاستعلامات العامة --------------------
 def get_all_active_users():
     conn = connect()
     cursor = conn.cursor()
@@ -179,8 +177,7 @@ def get_last_transaction(telegram_id):
     conn.close()
     return tx
 
-# ================= Regions =================
-
+# -------------------- المناطق --------------------
 def add_region(name):
     conn = connect()
     cursor = conn.cursor()
@@ -201,8 +198,7 @@ def delete_region(region_id):
     conn.commit()
     conn.close()
 
-# ================= Hospitals =================
-
+# -------------------- المستشفيات --------------------
 def add_hospital(region_id, name):
     conn = connect()
     cursor = conn.cursor()
@@ -226,8 +222,7 @@ def delete_hospital(hospital_id):
     conn.commit()
     conn.close()
 
-# ================= Departments =================
-
+# -------------------- الأقسام --------------------
 def add_department(hospital_id, name):
     conn = connect()
     cursor = conn.cursor()
@@ -251,8 +246,7 @@ def delete_department(department_id):
     conn.commit()
     conn.close()
 
-# ================= Doctors =================
-
+# -------------------- الأطباء --------------------
 def add_doctor(department_id, name, specialization, pdf_male, pdf_female):
     conn = connect()
     cursor = conn.cursor()
@@ -285,8 +279,7 @@ def get_doctor(doctor_id):
     cursor.execute("SELECT * FROM doctors WHERE id=?", (doctor_id,))
     return cursor.fetchone()
 
-# ================= Reports =================
-
+# -------------------- التقارير --------------------
 def save_report(telegram_id, hospital_name, doctor_name, patient_name):
     conn = connect()
     cursor = conn.cursor()
