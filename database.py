@@ -63,6 +63,64 @@ def init_db():
     conn.close()
 
 
+# ================= USERS =================
+
+def add_user(telegram_id, username):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR IGNORE INTO users (telegram_id, username) VALUES (?, ?)",
+        (telegram_id, username)
+    )
+    conn.commit()
+    conn.close()
+
+def get_user(telegram_id):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE telegram_id=?", (telegram_id,))
+    user = cursor.fetchone()
+    conn.close()
+    return user
+
+def get_balance(telegram_id):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT balance FROM users WHERE telegram_id=?", (telegram_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else 0
+
+def update_balance(telegram_id, amount):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE users SET balance = balance + ? WHERE telegram_id=?",
+        (amount, telegram_id)
+    )
+    conn.commit()
+    conn.close()
+
+def deduct_balance(telegram_id, amount):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE users SET balance = balance - ? WHERE telegram_id=?",
+        (amount, telegram_id)
+    )
+    conn.commit()
+    conn.close()
+
+def ban_user(telegram_id, status):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE users SET is_banned=? WHERE telegram_id=?",
+        (status, telegram_id)
+    )
+    conn.commit()
+    conn.close()
+
 # ================= Hospitals =================
 
 def add_hospital(name):
@@ -79,7 +137,6 @@ def get_hospitals():
     data = cursor.fetchall()
     conn.close()
     return data
-
 
 # ================= Departments =================
 
@@ -103,7 +160,6 @@ def get_departments(hospital_id):
     data = cursor.fetchall()
     conn.close()
     return data
-
 
 # ================= Doctors =================
 
