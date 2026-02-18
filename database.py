@@ -10,6 +10,7 @@ def init_db():
     conn = connect()
     cursor = conn.cursor()
 
+    # الجداول الأساسية
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,6 +29,43 @@ def init_db():
         telegram_id INTEGER,
         amount REAL,
         type TEXT,
+        created_at TEXT
+    )
+    """)
+
+    # جداول المستشفيات والأقسام والأطباء والتقارير (جديد)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS hospitals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS departments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        hospital_id INTEGER,
+        name TEXT
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS doctors (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        hospital_id INTEGER,
+        department_id INTEGER,
+        name TEXT,
+        specialization TEXT
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        telegram_id INTEGER,
+        hospital_name TEXT,
+        doctor_name TEXT,
+        patient_name TEXT,
         created_at TEXT
     )
     """)
@@ -126,3 +164,66 @@ def get_last_transaction(telegram_id):
     tx = cursor.fetchone()
     conn.close()
     return tx
+
+# ================= مستشفيات / أقسام / أطباء =================
+
+def add_hospital(name):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO hospitals (name) VALUES (?)", (name,))
+    conn.commit()
+    conn.close()
+
+def get_hospitals():
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM hospitals")
+    data = cursor.fetchall()
+    conn.close()
+    return data
+
+def add_department(hospital_id, name):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO departments (hospital_id, name) VALUES (?,?)",
+                   (hospital_id, name))
+    conn.commit()
+    conn.close()
+
+def get_departments(hospital_id):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM departments WHERE hospital_id=?",
+                   (hospital_id,))
+    data = cursor.fetchall()
+    conn.close()
+    return data
+
+def add_doctor(hospital_id, department_id, name, specialization):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO doctors (hospital_id, department_id, name, specialization)
+        VALUES (?,?,?,?)
+    """, (hospital_id, department_id, name, specialization))
+    conn.commit()
+    conn.close()
+
+def get_doctors(department_id):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM doctors WHERE department_id=?",
+                   (department_id,))
+    data = cursor.fetchall()
+    conn.close()
+    return data
+
+def save_report(telegram_id, hospital_name, doctor_name, patient_name):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO reports (telegram_id, hospital_name, doctor_name, patient_name, created_at)
+        VALUES (?,?,?,?, datetime('now'))
+    """, (telegram_id, hospital_name, doctor_name, patient_name))
+    conn.commit()
+    conn.close()
