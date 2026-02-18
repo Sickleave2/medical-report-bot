@@ -1,9 +1,13 @@
 import logging
 import os
 import io
+import random
 import fitz  # PyMuPDF
+from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
+from hijri_converter import Gregorian
 from aiogram import Bot, Dispatcher, executor, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InputFile
+from aiogram.types import ReplyKeyboardMarkup, InputFile
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
@@ -17,7 +21,9 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
-# تهيئة قاعدة البيانات وإضافة المناطق السعودية تلقائياً
+TEMPLATES_DIR = "templates"
+os.makedirs(TEMPLATES_DIR, exist_ok=True)
+
 database.init_db()
 database.seed_regions()
 
@@ -50,45 +56,117 @@ def yes_no_keyboard():
     kb.add("✅ نعم", "❌ لا")
     return kb
 
-def back_keyboard():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("🔙 رجوع")
-    return kb
-
 def cancel_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("❌ إلغاء العملية")
+    return kb
+
+def back_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("🔙 رجوع")
     return kb
 
 def get_correct_keyboard(user_id):
     is_admin = str(user_id) == ADMIN_ID
     return admin_keyboard() if is_admin else main_keyboard(False)
 
-# ========== حالات (States) ==========
+# ========== دوال مساعدة ==========
+async def download_template(file_id, region_id, hospital_id, department_id, gender):
+    file_info = await bot.get_file(file_id)
+    downloaded_file = await bot.download_file(file_info.file_path)
+    
+    region = database.get_region_name(region_id)
+    hospital = database.get_hospital_name(hospital_id)
+    department = database.get_department_name(department_id)
+    
+    region_code = region[:3].lower()
+    hospital_code = hospital[:3].lower()
+    dept_code = department[:3].lower()
+    filename = f"{region_code}_{hospital_code}_{dept_code}_{gender}.pdf"
+    filepath = os.path.join(TEMPLATES_DIR, filename)
+    
+    with open(filepath, "wb") as f:
+        f.write(downloaded_file.getvalue())
+    return filepath
 
-# إصدار تقرير
+def generate_file_no(start_date):
+    # start_date متوقع بصيغة YYYY-MM-DD
+    yymmdd = start_date.replace("-", "")[2:]  # 260815
+    random_part = f"{random.randint(100, 999)}"
+    return yymmdd + random_part
+
+def calculate_age(birth_date):
+    today = datetime.today().date()
+    age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+    return age
+
+def gregorian_to_hijri(date_obj):
+    h = Gregorian.fromdate(date_obj).to_hijri()
+    return f"{h.year}-{h.month:02d}-{h.day:02d}"
+
+def fill_pdf(template_path, output_stream, data):
+    doc = fitz.open(template_path)
+    page = doc[0]  # نفترض أن كل المحتوى في الصفحة الأولى
+
+    # إحداثيات تقريبية (تحتاج تعديل بعد التجربة)
+    # الاسم عربي
+    page.insert_text((100, 200), data["patient_name_ar"], fontsize=12)
+    # الاسم إنجليزي
+    page.insert_text((400, 200), data["patient_name_en"], fontsize=12)
+    # رقم الملف
+    page.insert_text((200, 250), data["file_no"], fontsize=12)
+    page.insert_text((500, 250), data["file_no"], fontsize=12)
+    # العمر
+    age_str = str(data["age"])
+    page.insert_text((200, 300), age_str, fontsize=12)
+    page.insert_text((500, 300), age_str, fontsize=12)
+    # الجنسية
+    page.insert_text((200, 350), "سعودي", fontsize=12)
+    page.insert_text((500, 350), "Saudi", fontsize=12)
+    # جهة العمل
+    page.insert_text((200, 400), data["employer"], fontsize=12)
+    page.insert_text((500, 400), data["employer"], fontsize=12)
+    # تاريخ مراجعة العيادة
+    page.insert_text((200, 450), data["clinic_date_ar"], fontsize=12)
+    page.insert_text((500, 450), data["clinic_date_en"], fontsize=12)
+    # تاريخ الدخول
+    page.insert_text((200, 500), data["admission_date_ar"], fontsize=12)
+    page.insert_text((500, 500), data["admission_date_en"], fontsize=12)
+    # تاريخ الخروج
+    page.insert_text((200, 550), data["discharge_date_ar"], fontsize=12)
+    page.insert_text((500, 550), data["discharge_date_en"], fontsize=12)
+    # عدد الأيام
+    days = data["leave_days"]
+    page.insert_text((300, 600), f"({days}) days", fontsize=12)
+    page.insert_text((300, 620), f"({days}) يوم", fontsize=12)
+    # من تاريخ إلى تاريخ
+    page.insert_text((200, 650), f"من {data['start_date_ar']} إلى {data['end_date_ar']}", fontsize=12)
+    page.insert_text((500, 650), f"From {data['start_date_en']} to {data['end_date_en']}", fontsize=12)
+
+    doc.save(output_stream)
+    doc.close()
+
+# ========== حالات ==========
 class CreateReport(StatesGroup):
     choose_region = State()
     choose_hospital = State()
     choose_department = State()
     choose_doctor = State()
     choose_gender = State()
-    patient_name = State()
-    patient_file_no = State()
-    patient_employer = State()
-    admission_date = State()
-    discharge_date = State()
+    patient_name_ar = State()
+    patient_name_en = State()
+    birth_date = State()
+    employer = State()
+    start_date = State()
     leave_days = State()
     confirm = State()
 
-# إدارة المناطق
 class AddRegion(StatesGroup):
     name = State()
 
 class DeleteRegion(StatesGroup):
     choose = State()
 
-# إدارة المستشفيات
 class AddHospital(StatesGroup):
     region = State()
     name = State()
@@ -96,7 +174,6 @@ class AddHospital(StatesGroup):
 class DeleteHospital(StatesGroup):
     choose = State()
 
-# إدارة الأقسام
 class AddDepartment(StatesGroup):
     region = State()
     hospital = State()
@@ -105,7 +182,6 @@ class AddDepartment(StatesGroup):
 class DeleteDepartment(StatesGroup):
     choose = State()
 
-# إدارة الأطباء
 class AddDoctor(StatesGroup):
     region = State()
     hospital = State()
@@ -118,7 +194,6 @@ class AddDoctor(StatesGroup):
 class DeleteDoctor(StatesGroup):
     choose = State()
 
-# إدارة الرصيد
 class AddBalance(StatesGroup):
     user_id = State()
     amount = State()
@@ -138,7 +213,6 @@ class UnbanUser(StatesGroup):
 class InfoUser(StatesGroup):
     user_id = State()
 
-# الإشعارات
 class NotifyUser(StatesGroup):
     user_id = State()
     message = State()
@@ -147,16 +221,6 @@ class NotifyUser(StatesGroup):
 class Broadcast(StatesGroup):
     message = State()
     confirm = State()
-
-# ========== دالة مساعدة للتحقق من الرصيد المنخفض ==========
-async def check_low_balance(user_id):
-    balance = database.get_balance(user_id)
-    if balance < 3:
-        try:
-            await bot.send_message(user_id,
-                "⚠ رصيدك أوشك على الانتهاء.\nالرجاء إعادة الشحن لإصدار تقاريرك بنجاح ✅")
-        except:
-            pass
 
 # ========== معالج الإلغاء ==========
 @dp.message_handler(lambda m: m.text == "❌ إلغاء العملية", state="*")
@@ -167,7 +231,7 @@ async def cancel_operation(message: types.Message, state: FSMContext):
     await state.finish()
     await message.answer("✅ تم إلغاء العملية.", reply_markup=get_correct_keyboard(message.from_user.id))
 
-# ========== بداية البوت ==========
+# ========== البداية ==========
 @dp.message_handler(commands=['start'])
 async def start(message: types.Message):
     user_id = message.from_user.id
@@ -176,12 +240,10 @@ async def start(message: types.Message):
     database.add_user(user_id, username, is_admin)
     await message.answer("🩺 أهلاً بك في نظام التقارير الطبية", reply_markup=main_keyboard(is_admin))
 
-# ========== الدعم ==========
 @dp.message_handler(lambda m: m.text == "ℹ️ الدعم")
 async def support(message: types.Message):
     await message.answer("للتواصل مع الدعم: @SupportHandle", reply_markup=get_correct_keyboard(message.from_user.id))
 
-# ========== عرض الرصيد ==========
 @dp.message_handler(lambda m: m.text == "💰 رصيدي")
 async def balance_handler(message: types.Message):
     user = database.get_user(message.from_user.id)
@@ -199,17 +261,14 @@ async def start_report(message: types.Message):
     if user and user[5] == 1:
         await message.answer("🚫 حسابك محظور.")
         return
-
     balance = database.get_balance(user_id)
     if float(balance) < 3.0:
         await message.answer("❌ رصيدك غير كافي.\nالرجاء إعادة الشحن لإصدار تقاريرك بنجاح ✅")
         return
-
     regions = database.get_regions()
     if not regions:
         await message.answer("لا توجد مناطق مسجلة حالياً، يرجى التواصل مع المطور.")
         return
-
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     for r in regions:
         kb.add(f"📍 {r[1]}")
@@ -223,7 +282,6 @@ async def choose_region(message: types.Message, state: FSMContext):
         await state.finish()
         await message.answer("تم الإلغاء.", reply_markup=get_correct_keyboard(message.from_user.id))
         return
-
     region_name = message.text.replace("📍 ", "")
     regions = database.get_regions()
     region_id = None
@@ -231,19 +289,20 @@ async def choose_region(message: types.Message, state: FSMContext):
         if r[1] == region_name:
             region_id = r[0]
             break
-
     if not region_id:
         await message.answer("❌ اختيار غير صحيح.")
         return
-
     hospitals = database.get_hospitals(region_id)
     if not hospitals:
-        await message.answer("لا توجد مستشفيات في هذه المنطقة.")
-        await state.finish()
-        return
-
+        # لا توجد مستشفيات -> نعيد عرض المناطق
+        regions = database.get_regions()
+        kb = ReplyKeyboardMarkup(resize_keyboard=True)
+        for r in regions:
+            kb.add(f"📍 {r[1]}")
+        kb.add("🔙 رجوع")
+        await message.answer("⚠️ لا توجد مستشفيات في هذه المنطقة حالياً. اختر منطقة أخرى:", reply_markup=kb)
+        return  # نبقى في نفس الحالة
     await state.update_data(region_id=region_id)
-
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     for h in hospitals:
         kb.add(f"🏥 {h[2]}")
@@ -254,32 +313,32 @@ async def choose_region(message: types.Message, state: FSMContext):
 @dp.message_handler(state=CreateReport.choose_hospital)
 async def choose_hospital(message: types.Message, state: FSMContext):
     if message.text == "🔙 رجوع":
-        await state.finish()
-        await message.answer("تم الإلغاء.", reply_markup=get_correct_keyboard(message.from_user.id))
+        # العودة لاختيار المنطقة
+        regions = database.get_regions()
+        kb = ReplyKeyboardMarkup(resize_keyboard=True)
+        for r in regions:
+            kb.add(f"📍 {r[1]}")
+        kb.add("🔙 رجوع")
+        await message.answer("اختر المنطقة:", reply_markup=kb)
+        await CreateReport.choose_region.set()
         return
-
     hospital_name = message.text.replace("🏥 ", "")
     data = await state.get_data()
     hospitals = database.get_hospitals(data["region_id"])
-
     hospital_id = None
     for h in hospitals:
         if h[2] == hospital_name:
             hospital_id = h[0]
             break
-
     if not hospital_id:
         await message.answer("❌ اختيار غير صحيح.")
         return
-
     departments = database.get_departments(hospital_id)
     if not departments:
-        await message.answer("لا توجد أقسام في هذا المستشفى.")
+        await message.answer("⚠️ لا توجد أقسام في هذا المستشفى حالياً.")
         await state.finish()
         return
-
     await state.update_data(hospital_id=hospital_id, hospital_name=hospital_name)
-
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     for d in departments:
         kb.add(f"🩺 {d[2]}")
@@ -290,32 +349,33 @@ async def choose_hospital(message: types.Message, state: FSMContext):
 @dp.message_handler(state=CreateReport.choose_department)
 async def choose_department(message: types.Message, state: FSMContext):
     if message.text == "🔙 رجوع":
-        await state.finish()
-        await message.answer("تم الإلغاء.", reply_markup=get_correct_keyboard(message.from_user.id))
+        # العودة لاختيار المستشفى
+        data = await state.get_data()
+        hospitals = database.get_hospitals(data["region_id"])
+        kb = ReplyKeyboardMarkup(resize_keyboard=True)
+        for h in hospitals:
+            kb.add(f"🏥 {h[2]}")
+        kb.add("🔙 رجوع")
+        await message.answer("اختر المستشفى:", reply_markup=kb)
+        await CreateReport.choose_hospital.set()
         return
-
     department_name = message.text.replace("🩺 ", "")
     data = await state.get_data()
     departments = database.get_departments(data["hospital_id"])
-
     department_id = None
     for d in departments:
         if d[2] == department_name:
             department_id = d[0]
             break
-
     if not department_id:
         await message.answer("❌ اختيار غير صحيح.")
         return
-
     doctors = database.get_doctors(department_id)
     if not doctors:
-        await message.answer("لا يوجد أطباء في هذا القسم.")
+        await message.answer("⚠️ لا يوجد أطباء في هذا القسم حالياً.")
         await state.finish()
         return
-
     await state.update_data(department_id=department_id)
-
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     for doc in doctors:
         kb.add(f"👨‍⚕️ {doc[3]}")
@@ -326,29 +386,30 @@ async def choose_department(message: types.Message, state: FSMContext):
 @dp.message_handler(state=CreateReport.choose_doctor)
 async def choose_doctor(message: types.Message, state: FSMContext):
     if message.text == "🔙 رجوع":
-        await state.finish()
-        await message.answer("تم الإلغاء.", reply_markup=get_correct_keyboard(message.from_user.id))
+        # العودة لاختيار القسم
+        data = await state.get_data()
+        departments = database.get_departments(data["hospital_id"])
+        kb = ReplyKeyboardMarkup(resize_keyboard=True)
+        for d in departments:
+            kb.add(f"🩺 {d[2]}")
+        kb.add("🔙 رجوع")
+        await message.answer("اختر القسم:", reply_markup=kb)
+        await CreateReport.choose_department.set()
         return
-
     doctor_name = message.text.replace("👨‍⚕️ ", "")
     data = await state.get_data()
     doctors = database.get_doctors(data["department_id"])
-
     doctor_id = None
     for doc in doctors:
         if doc[3] == doctor_name:
             doctor_id = doc[0]
             break
-
     if not doctor_id:
         await message.answer("❌ اختيار غير صحيح.")
         return
-
     doctor = database.get_doctor(doctor_id)
     await state.update_data(doctor_id=doctor_id, doctor_name=doctor_name,
-                            doctor_title=doctor[3],
                             pdf_male=doctor[4], pdf_female=doctor[5])
-
     # اختيار الجنس
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("👨 ذكر", "👩 أنثى")
@@ -359,64 +420,78 @@ async def choose_doctor(message: types.Message, state: FSMContext):
 @dp.message_handler(state=CreateReport.choose_gender)
 async def choose_gender(message: types.Message, state: FSMContext):
     if message.text == "🔙 رجوع":
-        await state.finish()
-        await message.answer("تم الإلغاء.", reply_markup=get_correct_keyboard(message.from_user.id))
+        # العودة لاختيار الطبيب
+        data = await state.get_data()
+        doctors = database.get_doctors(data["department_id"])
+        kb = ReplyKeyboardMarkup(resize_keyboard=True)
+        for doc in doctors:
+            kb.add(f"👨‍⚕️ {doc[3]}")
+        kb.add("🔙 رجوع")
+        await message.answer("اختر الطبيب:", reply_markup=kb)
+        await CreateReport.choose_doctor.set()
         return
-
     gender_map = {"👨 ذكر": "ذكر", "👩 أنثى": "أنثى"}
     if message.text not in gender_map:
         await message.answer("❌ اختيار غير صحيح.")
         return
     gender = gender_map[message.text]
     await state.update_data(gender=gender)
+    await message.answer("أدخل اسم المريض الكامل (بالعربية):", reply_markup=cancel_keyboard())
+    await CreateReport.patient_name_ar.set()
 
-    await message.answer("أدخل اسم المريض الكامل:", reply_markup=cancel_keyboard())
-    await CreateReport.patient_name.set()
-
-@dp.message_handler(state=CreateReport.patient_name)
-async def enter_patient_name(message: types.Message, state: FSMContext):
+@dp.message_handler(state=CreateReport.patient_name_ar)
+async def enter_patient_name_ar(message: types.Message, state: FSMContext):
     if message.text == "❌ إلغاء العملية":
         await cancel_operation(message, state)
         return
-    await state.update_data(patient_name=message.text)
-    await message.answer("أدخل رقم الملف الطبي:", reply_markup=cancel_keyboard())
-    await CreateReport.patient_file_no.set()
+    await state.update_data(patient_name_ar=message.text)
+    await message.answer("أدخل اسم المريض الكامل (بالإنجليزية):", reply_markup=cancel_keyboard())
+    await CreateReport.patient_name_en.set()
 
-@dp.message_handler(state=CreateReport.patient_file_no)
-async def enter_file_no(message: types.Message, state: FSMContext):
+@dp.message_handler(state=CreateReport.patient_name_en)
+async def enter_patient_name_en(message: types.Message, state: FSMContext):
     if message.text == "❌ إلغاء العملية":
         await cancel_operation(message, state)
         return
-    await state.update_data(file_no=message.text)
+    await state.update_data(patient_name_en=message.text)
+    await message.answer("أدخل تاريخ الميلاد (YYYY-MM-DD):", reply_markup=cancel_keyboard())
+    await CreateReport.birth_date.set()
+
+@dp.message_handler(state=CreateReport.birth_date)
+async def enter_birth_date(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    try:
+        birth_date = datetime.strptime(message.text, "%Y-%m-%d").date()
+    except ValueError:
+        await message.answer("❌ صيغة تاريخ غير صحيحة. استخدم YYYY-MM-DD")
+        return
+    await state.update_data(birth_date=birth_date)
     await message.answer("أدخل جهة العمل:", reply_markup=cancel_keyboard())
-    await CreateReport.patient_employer.set()
+    await CreateReport.employer.set()
 
-@dp.message_handler(state=CreateReport.patient_employer)
+@dp.message_handler(state=CreateReport.employer)
 async def enter_employer(message: types.Message, state: FSMContext):
     if message.text == "❌ إلغاء العملية":
         await cancel_operation(message, state)
         return
     await state.update_data(employer=message.text)
-    await message.answer("أدخل تاريخ الدخول (YYYY-MM-DD):", reply_markup=cancel_keyboard())
-    await CreateReport.admission_date.set()
+    await message.answer("أدخل تاريخ بداية الإجازة (YYYY-MM-DD):", reply_markup=cancel_keyboard())
+    await CreateReport.start_date.set()
 
-@dp.message_handler(state=CreateReport.admission_date)
-async def enter_admission_date(message: types.Message, state: FSMContext):
+@dp.message_handler(state=CreateReport.start_date)
+async def enter_start_date(message: types.Message, state: FSMContext):
     if message.text == "❌ إلغاء العملية":
         await cancel_operation(message, state)
         return
-    # يمكن إضافة التحقق من صحة التاريخ هنا
-    await state.update_data(admission_date=message.text)
-    await message.answer("أدخل تاريخ الخروج (YYYY-MM-DD):", reply_markup=cancel_keyboard())
-    await CreateReport.discharge_date.set()
-
-@dp.message_handler(state=CreateReport.discharge_date)
-async def enter_discharge_date(message: types.Message, state: FSMContext):
-    if message.text == "❌ إلغاء العملية":
-        await cancel_operation(message, state)
+    try:
+        start_date = datetime.strptime(message.text, "%Y-%m-%d").date()
+    except ValueError:
+        await message.answer("❌ صيغة تاريخ غير صحيحة. استخدم YYYY-MM-DD")
         return
-    await state.update_data(discharge_date=message.text)
-    await message.answer("أدخل عدد أيام الإجازة المرضية:", reply_markup=cancel_keyboard())
+    await state.update_data(start_date=start_date)
+    await message.answer("أدخل عدد أيام الإجازة:", reply_markup=cancel_keyboard())
     await CreateReport.leave_days.set()
 
 @dp.message_handler(state=CreateReport.leave_days)
@@ -424,18 +499,58 @@ async def enter_leave_days(message: types.Message, state: FSMContext):
     if message.text == "❌ إلغاء العملية":
         await cancel_operation(message, state)
         return
-    await state.update_data(leave_days=message.text)
-
-    # عرض ملخص البيانات للتأكيد
+    if not message.text.isdigit() or int(message.text) <= 0:
+        await message.answer("❌ الرجاء إدخال رقم صحيح أكبر من 0")
+        return
+    leave_days = int(message.text)
     data = await state.get_data()
+    start_date = data["start_date"]
+    end_date = start_date + timedelta(days=leave_days - 1)
+    age = calculate_age(data["birth_date"])
+    file_no = generate_file_no(start_date)
+
+    # تحويل التواريخ إلى هجري
+    clinic_date_ar = gregorian_to_hijri(start_date)
+    clinic_date_en = start_date.strftime("%d-%m-%Y")
+    admission_date_ar = clinic_date_ar
+    admission_date_en = clinic_date_en
+    discharge_date_ar = gregorian_to_hijri(end_date)
+    discharge_date_en = end_date.strftime("%d-%m-%Y")
+    start_date_ar = clinic_date_ar
+    start_date_en = clinic_date_en
+    end_date_ar = discharge_date_ar
+    end_date_en = discharge_date_en
+
+    # حفظ البيانات المحسوبة
+    await state.update_data(
+        leave_days=leave_days,
+        end_date=end_date,
+        age=age,
+        file_no=file_no,
+        clinic_date_ar=clinic_date_ar,
+        clinic_date_en=clinic_date_en,
+        admission_date_ar=admission_date_ar,
+        admission_date_en=admission_date_en,
+        discharge_date_ar=discharge_date_ar,
+        discharge_date_en=discharge_date_en,
+        start_date_ar=start_date_ar,
+        start_date_en=start_date_en,
+        end_date_ar=end_date_ar,
+        end_date_en=end_date_en
+    )
+
+    # عرض ملخص
     summary = (
         f"📋 ملخص البيانات:\n"
-        f"👤 الاسم: {data['patient_name']}\n"
-        f"🆔 رقم الملف: {data['file_no']}\n"
+        f"👤 الاسم عربي: {data['patient_name_ar']}\n"
+        f"👤 اسم إنجليزي: {data['patient_name_en']}\n"
+        f"🆔 رقم الملف: {file_no}\n"
+        f"🎂 العمر: {age}\n"
         f"🏢 جهة العمل: {data['employer']}\n"
-        f"📅 تاريخ الدخول: {data['admission_date']}\n"
-        f"📅 تاريخ الخروج: {data['discharge_date']}\n"
-        f"📆 عدد الأيام: {data['leave_days']}\n"
+        f"📅 تاريخ الميلاد: {data['birth_date']}\n"
+        f"📅 بداية الإجازة: {start_date}\n"
+        f"📆 عدد الأيام: {leave_days}\n"
+        f"📅 نهاية الإجازة: {end_date}\n"
         f"🏥 المستشفى: {data['hospital_name']}\n"
         f"👨‍⚕️ الطبيب: {data['doctor_name']}\n"
         f"⚥ الجنس: {data['gender']}\n\n"
@@ -462,53 +577,55 @@ async def confirm_report(message: types.Message, state: FSMContext):
     # خصم الرصيد
     database.update_balance(user_id, -3, "report")
 
-    # حفظ التقرير في قاعدة البيانات
-    database.save_report(user_id, data["doctor_id"], data["patient_name"], data["gender"])
+    # حفظ التقرير
+    database.save_report(user_id, data["doctor_id"], data["patient_name_ar"], data["gender"])
 
-    # تحديد قالب PDF المناسب
-    pdf_file_id = data["pdf_male"] if data["gender"] == "ذكر" else data["pdf_female"]
+    # اختيار القالب المناسب
+    pdf_path = data["pdf_male"] if data["gender"] == "ذكر" else data["pdf_female"]
 
-    # تحميل القالب من تليجرام
+    # تجهيز بيانات التعبئة
+    fill_data = {
+        "patient_name_ar": data["patient_name_ar"],
+        "patient_name_en": data["patient_name_en"],
+        "file_no": data["file_no"],
+        "age": data["age"],
+        "employer": data["employer"],
+        "clinic_date_ar": data["clinic_date_ar"],
+        "clinic_date_en": data["clinic_date_en"],
+        "admission_date_ar": data["admission_date_ar"],
+        "admission_date_en": data["admission_date_en"],
+        "discharge_date_ar": data["discharge_date_ar"],
+        "discharge_date_en": data["discharge_date_en"],
+        "leave_days": data["leave_days"],
+        "start_date_ar": data["start_date_ar"],
+        "start_date_en": data["start_date_en"],
+        "end_date_ar": data["end_date_ar"],
+        "end_date_en": data["end_date_en"]
+    }
+
+    # تعبئة PDF
+    output_stream = io.BytesIO()
     try:
-        file_info = await bot.get_file(pdf_file_id)
-        downloaded_file = await bot.download_file(file_info.file_path)
-        pdf_bytes = downloaded_file.getvalue()
+        fill_pdf(pdf_path, output_stream, fill_data)
     except Exception as e:
-        await message.answer(f"حدث خطأ في تحميل قالب PDF: {e}")
+        await message.answer(f"❌ حدث خطأ أثناء تعبئة التقرير: {e}")
         await state.finish()
         return
 
-    # تعبئة الحقول (يجب تعديل أسماء الحقول حسب ملفك)
-    try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        for page in doc:
-            widgets = page.widgets()
-            if widgets:
-                for w in widgets:
-                    # هنا سنقوم بتعبئة الحقول بناءً على الأسماء الفعلية التي ستزودني بها
-                    # مثال مؤقت:
-                    if w.field_name == "full_name":
-                        w.field_value = data["patient_name"]
-                        w.update()
-                    elif w.field_name == "file_no":
-                        w.field_value = data["file_no"]
-                        w.update()
-                    # أضف باقي الحقول حسب ما سترسله
-        output_stream = io.BytesIO()
-        doc.save(output_stream)
-        doc.close()
-        output_stream.seek(0)
-    except Exception as e:
-        await message.answer(f"حدث خطأ في تعبئة PDF: {e}")
-        await state.finish()
-        return
-
-    # إرسال الملف المعبأ
+    output_stream.seek(0)
     await bot.send_document(user_id, InputFile(output_stream, filename="تقرير_طبي.pdf"))
 
     await check_low_balance(user_id)
     await message.answer("✅ تم إنشاء التقرير بنجاح.", reply_markup=get_correct_keyboard(user_id))
     await state.finish()
+
+async def check_low_balance(user_id):
+    balance = database.get_balance(user_id)
+    if balance < 3:
+        try:
+            await bot.send_message(user_id, "⚠ رصيدك أوشك على الانتهاء.\nالرجاء إعادة الشحن لإصدار تقاريرك بنجاح ✅")
+        except:
+            pass
 
 # ========== لوحة المطور ==========
 @dp.message_handler(lambda m: m.text == "👑 لوحة المطور")
@@ -556,7 +673,6 @@ async def add_balance_amount(message: types.Message, state: FSMContext):
     except:
         await message.answer("❌ مبلغ غير صحيح (1 - 10000)")
         return
-
     await state.update_data(amount=amount)
     await message.answer("هل تريد إرسال إشعار للمستخدم؟", reply_markup=yes_no_keyboard())
     await AddBalance.confirm_notify.set()
@@ -569,22 +685,16 @@ async def add_balance_confirm(message: types.Message, state: FSMContext):
     data = await state.get_data()
     user_id = data["user_id"]
     amount = data["amount"]
-
     database.update_balance(user_id, amount, "add")
-
     if message.text == "✅ نعم":
         try:
-            await bot.send_message(
-                user_id,
-                f"💰 تم إضافة {amount} ريال إلى حسابك.\nرصيدك الحالي: {database.get_balance(user_id)} ريال"
-            )
+            await bot.send_message(user_id, f"💰 تم إضافة {amount} ريال إلى حسابك.\nرصيدك الحالي: {database.get_balance(user_id)} ريال")
         except:
             pass
-
     await message.answer("✅ تم تنفيذ العملية.", reply_markup=balance_management_keyboard())
     await state.finish()
 
-# خصم رصيد (مشابه للإضافة مع تغيير الإشارة)
+# خصم رصيد
 @dp.message_handler(lambda m: m.text == "➖ خصم رصيد")
 async def deduct_balance_start(message: types.Message):
     if str(message.from_user.id) != ADMIN_ID:
@@ -616,7 +726,6 @@ async def deduct_balance_amount(message: types.Message, state: FSMContext):
     except:
         await message.answer("❌ مبلغ غير صحيح.")
         return
-
     await state.update_data(amount=amount)
     await message.answer("هل تريد إرسال إشعار للمستخدم؟", reply_markup=yes_no_keyboard())
     await DeductBalance.confirm_notify.set()
@@ -629,18 +738,12 @@ async def deduct_balance_confirm(message: types.Message, state: FSMContext):
     data = await state.get_data()
     user_id = data["user_id"]
     amount = data["amount"]
-
     database.update_balance(user_id, -amount, "deduct")
-
     if message.text == "✅ نعم":
         try:
-            await bot.send_message(
-                user_id,
-                f"⚠ تم خصم {amount} ريال من حسابك.\nرصيدك الحالي: {database.get_balance(user_id)} ريال"
-            )
+            await bot.send_message(user_id, f"⚠ تم خصم {amount} ريال من حسابك.\nرصيدك الحالي: {database.get_balance(user_id)} ريال")
         except:
             pass
-
     await message.answer("✅ تم تنفيذ العملية.", reply_markup=balance_management_keyboard())
     await state.finish()
 
@@ -666,15 +769,12 @@ async def info_user_execute(message: types.Message, state: FSMContext):
         await message.answer("المستخدم غير موجود.")
         await state.finish()
         return
-
     balance = database.get_balance(user_id)
     status = "محظور 🚫" if user[5] == 1 else "نشط ✅"
     last_tx = database.get_last_transaction(user_id)
-
     tx_text = "لا توجد عمليات."
     if last_tx:
         tx_text = f"{last_tx[1]} | {last_tx[0]} | {last_tx[2]}"
-
     await message.answer(
         f"👤 معلومات المستخدم:\n\n"
         f"🆔 ID: {user_id}\n"
@@ -730,10 +830,7 @@ async def unban_execute(message: types.Message, state: FSMContext):
     user_id = int(message.text)
     database.ban_user(user_id, 0)
     try:
-        await bot.send_message(
-            user_id,
-            "🎉 تم فك الحظر عن حسابك.\nالآن يمكنك استخدام البوت بكامل ميزاته الخرافية 😍✔️"
-        )
+        await bot.send_message(user_id, "🎉 تم فك الحظر عن حسابك.\nالآن يمكنك استخدام البوت بكامل ميزاته الخرافية 😍✔️")
     except:
         pass
     await message.answer("✅ تم فك الحظر وإرسال إشعار.", reply_markup=balance_management_keyboard())
@@ -979,7 +1076,6 @@ async def add_department_region(message: types.Message, state: FSMContext):
         await message.answer("❌ منطقة غير صحيحة.")
         return
     await state.update_data(region_id=region_id)
-
     hospitals = database.get_hospitals(region_id)
     if not hospitals:
         await message.answer("لا توجد مستشفيات في هذه المنطقة.")
@@ -1001,7 +1097,6 @@ async def add_department_hospital(message: types.Message, state: FSMContext):
     hospital_name = message.text.replace("🏥 ", "")
     data = await state.get_data()
     hospitals = database.get_hospitals(data["region_id"])
-
     hospital_id = None
     for h in hospitals:
         if h[2] == hospital_name:
@@ -1118,7 +1213,6 @@ async def add_doctor_region(message: types.Message, state: FSMContext):
         await message.answer("❌ منطقة غير صحيحة.")
         return
     await state.update_data(region_id=region_id)
-
     hospitals = database.get_hospitals(region_id)
     if not hospitals:
         await message.answer("لا توجد مستشفيات في هذه المنطقة.")
@@ -1140,7 +1234,6 @@ async def add_doctor_hospital(message: types.Message, state: FSMContext):
     hospital_name = message.text.replace("🏥 ", "")
     data = await state.get_data()
     hospitals = database.get_hospitals(data["region_id"])
-
     hospital_id = None
     for h in hospitals:
         if h[2] == hospital_name:
@@ -1150,7 +1243,6 @@ async def add_doctor_hospital(message: types.Message, state: FSMContext):
         await message.answer("❌ مستشفى غير صحيح.")
         return
     await state.update_data(hospital_id=hospital_id)
-
     departments = database.get_departments(hospital_id)
     if not departments:
         await message.answer("لا توجد أقسام في هذا المستشفى.")
@@ -1172,7 +1264,6 @@ async def add_doctor_department(message: types.Message, state: FSMContext):
     department_name = message.text.replace("🩺 ", "")
     data = await state.get_data()
     departments = database.get_departments(data["hospital_id"])
-
     department_id = None
     for d in departments:
         if d[2] == department_name:
@@ -1182,7 +1273,6 @@ async def add_doctor_department(message: types.Message, state: FSMContext):
         await message.answer("❌ قسم غير صحيح.")
         return
     await state.update_data(department_id=department_id)
-
     await message.answer("أرسل اسم الطبيب:", reply_markup=cancel_keyboard())
     await AddDoctor.name.set()
 
@@ -1233,12 +1323,15 @@ async def add_doctor_pdf_female(message: types.Message, state: FSMContext):
     if message.document:
         file_id = message.document.file_id
         data = await state.get_data()
+        # تحميل وحفظ القالب
+        male_path = await download_template(data["pdf_male"], data["region_id"], data["hospital_id"], data["department_id"], "male")
+        female_path = await download_template(file_id, data["region_id"], data["hospital_id"], data["department_id"], "female")
         database.add_doctor(
             data["department_id"],
             data["name"],
             data["title"],
-            data["pdf_male"],
-            file_id
+            male_path,
+            female_path
         )
         await message.answer(f"✅ تم إضافة الطبيب '{data['name']}' بنجاح.", reply_markup=admin_keyboard())
         await state.finish()
