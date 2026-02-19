@@ -2,3 +2,6 @@ aiogram==2.25.1
 PyMuPDF
 hijri-converter
 python-dateutil
+arabic-reshaper
+python-bidi
+unidecode
