@@ -1,31 +1,24 @@
 import logging
 import os
 import io
-import json
-import random
 import re
+import random
 import fitz  # PyMuPDF
 from datetime import datetime, timedelta, date
 from dateutil.relativedelta import relativedelta
 from hijri_converter import Gregorian
 from unidecode import unidecode
-from deep_translator import GoogleTranslator
+import arabic_reshaper
+from bidi.algorithm import get_display
 from aiogram import Bot, Dispatcher, executor, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InputFile
+from aiogram.types import ReplyKeyboardMarkup, InputFile
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 import database
 
-# ========== التحقق من وجود ADMIN_ID ==========
-ADMIN_ID = os.getenv("ADMIN_ID")
-if not ADMIN_ID:
-    raise ValueError("❌ ADMIN_ID is not set in environment variables")
-ADMIN_ID = ADMIN_ID.strip()
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN is not set in environment variables")
+ADMIN_ID = str(os.getenv("ADMIN_ID")).strip()
 
 logging.basicConfig(level=logging.INFO)
 
@@ -39,50 +32,71 @@ database.init_db()
 database.seed_regions()
 
 # ========== دوال مساعدة ==========
-def transliterate_arabic(text):
-    """تحويل النص العربي إلى حروف لاتينية (تقريبي)"""
-    return unidecode(text)
+def slugify(text):
+    """تحويل النص إلى كود مختصر (أحرف صغيرة بدون مسافات)"""
+    text = unidecode(text).lower()
+    text = re.sub(r'\s+', '_', text)
+    text = re.sub(r'[^a-z0-9_]', '', text)
+    return text[:10]
 
-def translate_ar_to_en(text):
-    """ترجمة من العربية إلى الإنجليزية مع fallback"""
-    try:
-        return GoogleTranslator(source='ar', target='en').translate(text)
-    except Exception as e:
-        logging.warning(f"Translation failed, using unidecode: {e}")
-        return transliterate_arabic(text)
+def get_template_path(region_name, hospital_name, department_name, gender):
+    """إنشاء مسار لحفظ القالب"""
+    region_code = slugify(region_name)[:3]
+    hospital_code = slugify(hospital_name)[:3]
+    dept_code = slugify(department_name)[:3]
+    filename = f"{region_code}_{hospital_code}_{dept_code}_{gender}.pdf"
+    folder = os.path.join(TEMPLATES_DIR, f"{region_code}_{hospital_code}_{dept_code}")
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, filename)
 
-def gregorian_to_hijri_str(greg_date):
-    """تحويل تاريخ ميلادي إلى سلسلة هجرية YYYY-MM-DD"""
-    h = Gregorian.fromdate(greg_date).to_hijri()
-    return f"{h.year}-{h.month:02d}-{h.day:02d}"
+def extract_form_fields(pdf_path):
+    """استخراج أسماء الحقول من PDF Form"""
+    doc = fitz.open(pdf_path)
+    fields = []
+    for page in doc:
+        widgets = page.widgets()
+        if widgets:
+            for w in widgets:
+                if w.field_name:
+                    fields.append(w.field_name)
+    doc.close()
+    return fields
+
+def fill_pdf_form(template_path, output_stream, data):
+    """
+    تعبئة حقول PDF بناءً على قاموس البيانات.
+    data مفتاح = field_name, قيمة = value.
+    """
+    doc = fitz.open(template_path)
+    for page in doc:
+        widgets = page.widgets()
+        if widgets:
+            for w in widgets:
+                if w.field_name in data:
+                    w.field_value = str(data[w.field_name])
+                    w.update()
+    doc.save(output_stream)
+    doc.close()
 
 def generate_file_no(start_date):
-    """توليد رقم ملف: YYMMDD + 3 أرقام عشوائية"""
-    yymmdd = start_date.strftime("%y%m%d")
-    rand = f"{random.randint(100, 999)}"
-    return yymmdd + rand
+    # start_date: date object
+    yymmdd = start_date.strftime("%y%m%d")  # 260815
+    random_part = f"{random.randint(100, 999)}"
+    return yymmdd + random_part
 
 def calculate_age(birth_date):
-    """حساب العمر من تاريخ الميلاد"""
     today = date.today()
-    return today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+    age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+    return age
 
-def validate_date(date_str):
-    """التحقق من صحة التاريخ"""
-    try:
-        return datetime.strptime(date_str, "%Y-%m-%d").date()
-    except ValueError:
-        return None
+def gregorian_to_hijri(date_obj):
+    h = Gregorian.fromdate(date_obj).to_hijri()
+    return f"{h.year}-{h.month:02d}-{h.day:02d}"
 
-def validate_positive_int(value_str, max_val=30):
-    """التحقق من أن القيمة رقم صحيح موجب وأقل من حد معين"""
-    try:
-        val = int(value_str)
-        if 1 <= val <= max_val:
-            return val
-        return None
-    except ValueError:
-        return None
+def translate_arabic_to_english(text):
+    """ترجمة بسيطة للاسم أو النص (يمكن تحسينها بقاموس)"""
+    # هذه مجرد ترجمة تجريبية باستخدام unidecode
+    return unidecode(text)
 
 # ========== لوحات المفاتيح ==========
 def main_keyboard(is_admin=False):
@@ -106,14 +120,6 @@ def balance_management_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("➕ إضافة رصيد", "➖ خصم رصيد")
     kb.add("👤 معلومات مستخدم", "🚫 حظر", "🔓 فك حظر")
-    kb.add("🔙 رجوع")
-    return kb
-
-def templates_management_keyboard():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("📄 إدارة القوالب", "🧩 إدارة الحقول")
-    kb.add("📋 تحديد البيانات المطلوبة", "🔄 تعديل قالب")
-    kb.add("🗑 حذف قالب", "💾 حفظ التكوين")
     kb.add("🔙 رجوع")
     return kb
 
@@ -143,46 +149,9 @@ class CreateReport(StatesGroup):
     choose_department = State()
     choose_doctor = State()
     choose_gender = State()
-    dynamic_fields = State()
-    confirm = State()
-
-class ManageTemplates(StatesGroup):
-    choose_doctor = State()
-    upload_male = State()
-    upload_female = State()
-    select_fields_to_fill = State()
-    select_user_fields = State()
-
-class EditTemplate(StatesGroup):
-    choose_doctor = State()
-    action = State()
-
-class AddBalance(StatesGroup):
-    user_id = State()
-    amount = State()
-    confirm_notify = State()
-
-class DeductBalance(StatesGroup):
-    user_id = State()
-    amount = State()
-    confirm_notify = State()
-
-class BanUser(StatesGroup):
-    user_id = State()
-
-class UnbanUser(StatesGroup):
-    user_id = State()
-
-class InfoUser(StatesGroup):
-    user_id = State()
-
-class NotifyUser(StatesGroup):
-    user_id = State()
-    message = State()
-    confirm = State()
-
-class Broadcast(StatesGroup):
-    message = State()
+    # سيتم إنشاء حالات ديناميكية بناءً على البيانات المطلوبة
+    # نستخدم قاموس داخل state data لتخزين القيم
+    waiting_for_data = State()
     confirm = State()
 
 class AddRegion(StatesGroup):
@@ -212,22 +181,48 @@ class AddDoctor(StatesGroup):
     department = State()
     name = State()
     title = State()
+    pdf_male = State()
+    pdf_female = State()
 
 class DeleteDoctor(StatesGroup):
     choose = State()
 
-# ========== معالج الأخطاء العام ==========
-@dp.errors_handler()
-async def global_error_handler(update: types.Update, exception: Exception):
-    logging.exception(f"Unhandled error: {exception}")
-    try:
-        if update.message:
-            await update.message.answer("❌ حدث خطأ داخلي. يرجى المحاولة لاحقاً.")
-    except:
-        pass
-    return True
+# --- حالات إدارة القوالب (جديد) ---
+class ManageTemplates(StatesGroup):
+    choose_doctor = State()
+    show_fields = State()
+    select_required_data = State()
+    confirm_settings = State()
 
-# ========== معالج الإلغاء ==========
+class AddBalance(StatesGroup):
+    user_id = State()
+    amount = State()
+    confirm_notify = State()
+
+class DeductBalance(StatesGroup):
+    user_id = State()
+    amount = State()
+    confirm_notify = State()
+
+class BanUser(StatesGroup):
+    user_id = State()
+
+class UnbanUser(StatesGroup):
+    user_id = State()
+
+class InfoUser(StatesGroup):
+    user_id = State()
+
+class NotifyUser(StatesGroup):
+    user_id = State()
+    message = State()
+    confirm = State()
+
+class Broadcast(StatesGroup):
+    message = State()
+    confirm = State()
+
+# ========== معالج الإلغاء (معدل) ==========
 @dp.message_handler(lambda m: m.text == "❌ إلغاء العملية", state="*")
 async def cancel_operation(message: types.Message, state: FSMContext):
     if await state.get_state() is None:
@@ -258,7 +253,7 @@ async def balance_handler(message: types.Message):
     balance = database.get_balance(message.from_user.id)
     await message.answer(f"رصيدك الحالي: {balance} ريال", reply_markup=get_correct_keyboard(message.from_user.id))
 
-# ========== إصدار تقرير (محدث) ==========
+# ========== إصدار تقرير (محدث بالكامل ليكون ديناميكياً) ==========
 @dp.message_handler(lambda m: m.text == "🤍 إصدار إجازتك الآن")
 async def start_report(message: types.Message):
     user_id = message.from_user.id
@@ -299,6 +294,7 @@ async def choose_region(message: types.Message, state: FSMContext):
         return
     hospitals = database.get_hospitals(region_id)
     if not hospitals:
+        # لا توجد مستشفيات: نعيد عرض المناطق
         regions = database.get_regions()
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
         for r in regions:
@@ -306,7 +302,7 @@ async def choose_region(message: types.Message, state: FSMContext):
         kb.add("🔙 رجوع")
         await message.answer("⚠️ لا توجد مستشفيات في هذه المنطقة حالياً. اختر منطقة أخرى:", reply_markup=kb)
         return
-    await state.update_data(region_id=region_id)
+    await state.update_data(region_id=region_id, region_name=region_name)
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     for h in hospitals:
         kb.add(f"🏥 {h[2]}")
@@ -317,6 +313,7 @@ async def choose_region(message: types.Message, state: FSMContext):
 @dp.message_handler(state=CreateReport.choose_hospital)
 async def choose_hospital(message: types.Message, state: FSMContext):
     if message.text == "🔙 رجوع":
+        # العودة للمناطق
         regions = database.get_regions()
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
         for r in regions:
@@ -408,13 +405,17 @@ async def choose_doctor(message: types.Message, state: FSMContext):
     if not doctor_id:
         await message.answer("❌ اختيار غير صحيح.")
         return
-    # التحقق من وجود تكوين قالب
-    template = database.get_template_config(doctor_id)
-    if not template:
-        await message.answer("⚠️ لم يتم إعداد قالب تقرير لهذا الطبيب بعد. يرجى التواصل مع المطور.")
-        await state.finish()
+    doctor = database.get_doctor(doctor_id)
+    if not doctor:
+        await message.answer("❌ خطأ في بيانات الطبيب.")
         return
-    await state.update_data(doctor_id=doctor_id, doctor_name=doctor_name, template=template)
+    await state.update_data(
+        doctor_id=doctor_id,
+        doctor_name=doctor_name,
+        template_male=doctor[4],
+        template_female=doctor[5]
+    )
+    # اختيار الجنس
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("👨 ذكر", "👩 أنثى")
     kb.add("🔙 رجوع")
@@ -438,84 +439,90 @@ async def choose_gender(message: types.Message, state: FSMContext):
         await message.answer("❌ اختيار غير صحيح.")
         return
     gender = gender_map[message.text]
+    await state.update_data(gender=gender)
+
+    # الآن نحتاج لمعرفة البيانات المطلوبة لهذا الطبيب
     data = await state.get_data()
-    template = data['template']
-    user_fields = template['user_fields']
+    doctor_id = data["doctor_id"]
+    required_keys = database.get_required_data(doctor_id)
+    if not required_keys:
+        # إذا لم يحدد المطور أي بيانات مطلوبة، نستخدم مجموعة افتراضية
+        required_keys = ["full_name", "birth_date", "employer", "nationality", "start_date", "leave_days"]
+        # نحفظها مؤقتاً
+    # نخزن قائمة المفاتيح المطلوبة في state
+    await state.update_data(required_keys=required_keys, current_data={})
+    # نبدأ بطلب أول عنصر
+    await ask_next_required_data(message, state)
 
-    if not user_fields:
-        # حقول افتراضية
-        user_fields = ["full_name_ar", "birth_date", "employer", "nationality", "leave_days"]
-        await state.update_data(user_fields=user_fields)
-
-    await state.update_data(gender=gender, answers={}, current_field_index=0, user_fields=user_fields)
-    await ask_next_field(message, state)
-
-async def ask_next_field(message: types.Message, state: FSMContext):
+async def ask_next_required_data(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    user_fields = data['user_fields']
-    index = data.get('current_field_index', 0)
-    if index >= len(user_fields):
-        await show_summary(message, state)
-        return
+    required = data.get("required_keys", [])
+    collected = data.get("current_data", {})
+    # نحدد أول مفتاح لم يُجمع بعد
+    for key in required:
+        if key not in collected:
+            prompt = get_prompt_for_key(key)
+            await message.answer(prompt, reply_markup=cancel_keyboard())
+            # نخزن المفتاح الحالي في انتظار الرد
+            await state.update_data(current_key=key)
+            await CreateReport.waiting_for_data.set()
+            return
+    # إذا تم جمع كل شيء، نعرض الملخص
+    await show_summary_and_confirm(message, state)
 
-    field_name = user_fields[index]
+def get_prompt_for_key(key):
     prompts = {
-        "full_name_ar": "أدخل الاسم الكامل (بالعربية):",
-        "full_name_en": "أدخل الاسم الكامل (بالإنجليزية):",
+        "full_name": "أدخل الاسم الكامل (بالعربية):",
         "birth_date": "أدخل تاريخ الميلاد (YYYY-MM-DD):",
         "employer": "أدخل جهة العمل:",
         "nationality": "أدخل الجنسية:",
-        "leave_days": "أدخل عدد أيام الإجازة:",
         "start_date": "أدخل تاريخ بداية الإجازة (YYYY-MM-DD):",
+        "leave_days": "أدخل عدد أيام الإجازة:",
+        "age": "أدخل العمر (اختياري إذا لم تدخل تاريخ الميلاد):",
+        "file_no": "رقم الملف (سيتم توليده تلقائياً)",
+        # يمكن إضافة المزيد حسب الحاجة
     }
-    prompt = prompts.get(field_name, f"أدخل قيمة {field_name}:")
-    await message.answer(prompt, reply_markup=cancel_keyboard())
-    await CreateReport.dynamic_fields.set()
+    return prompts.get(key, f"أدخل {key}:")
 
-@dp.message_handler(state=CreateReport.dynamic_fields)
-async def handle_dynamic_field(message: types.Message, state: FSMContext):
+@dp.message_handler(state=CreateReport.waiting_for_data)
+async def handle_required_data(message: types.Message, state: FSMContext):
     if message.text == "❌ إلغاء العملية":
         await cancel_operation(message, state)
         return
     data = await state.get_data()
-    user_fields = data['user_fields']
-    index = data['current_field_index']
-    field_name = user_fields[index]
-    answers = data.get('answers', {})
-
-    # التحقق من صحة المدخلات حسب نوع الحقل
-    valid = True
-    value = message.text
-    if field_name == "birth_date":
-        if not validate_date(value):
+    current_key = data.get("current_key")
+    collected = data.get("current_data", {})
+    # تحقق من صحة الإدخال حسب المفتاح
+    if current_key == "birth_date" or current_key == "start_date":
+        try:
+            datetime.strptime(message.text, "%Y-%m-%d")
+        except ValueError:
             await message.answer("❌ صيغة تاريخ غير صحيحة. استخدم YYYY-MM-DD")
-            valid = False
-    elif field_name == "leave_days":
-        days = validate_positive_int(value, 30)
-        if days is None:
-            await message.answer("❌ عدد الأيام يجب أن يكون رقماً بين 1 و 30")
-            valid = False
-        else:
-            value = days  # نحتفظ بالقيمة الرقمية
-    # يمكن إضافة المزيد من التحقق حسب الحاجة
+            return
+    elif current_key == "leave_days":
+        if not message.text.isdigit() or int(message.text) <= 0:
+            await message.answer("❌ الرجاء إدخال رقم صحيح أكبر من 0")
+            return
+    elif current_key == "age":
+        if message.text and not message.text.isdigit():
+            await message.answer("❌ الرجاء إدخال رقم صحيح للعمر")
+            return
+    collected[current_key] = message.text
+    await state.update_data(current_data=collected)
+    # طلب العنصر التالي
+    await ask_next_required_data(message, state)
 
-    if not valid:
-        return  # نبقى في نفس الحالة
-
-    answers[field_name] = value
-    await state.update_data(answers=answers, current_field_index=index+1)
-    await ask_next_field(message, state)
-
-async def show_summary(message: types.Message, state: FSMContext):
+async def show_summary_and_confirm(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    answers = data['answers']
-    summary_lines = ["📋 ملخص البيانات:"]
-    for k, v in answers.items():
-        summary_lines.append(f"{k}: {v}")
-    summary_lines.append("\nهل البيانات صحيحة؟")
+    collected = data.get("current_data", {})
+    # تجميع الملخص
+    lines = ["📋 ملخص البيانات:"]
+    for key, value in collected.items():
+        lines.append(f"• {key}: {value}")
+    lines.append("هل البيانات صحيحة؟")
     kb = yes_no_keyboard()
     kb.add("❌ إلغاء العملية")
-    await message.answer("\n".join(summary_lines), reply_markup=kb)
+    await message.answer("\n".join(lines), reply_markup=kb)
     await CreateReport.confirm.set()
 
 @dp.message_handler(state=CreateReport.confirm)
@@ -529,136 +536,110 @@ async def confirm_report(message: types.Message, state: FSMContext):
         return
 
     data = await state.get_data()
-    answers = data['answers']
     user_id = message.from_user.id
-    gender = data['gender']
-    doctor_id = data['doctor_id']
-    template = data['template']
+    collected = data.get("current_data", {})
 
-    # --- تحضير البيانات المحسوبة مع معالجة الأخطاء ---
+    # --- معالجة البيانات المحسوبة ---
+    # رقم الملف الطبي
+    if "start_date" in collected:
+        start_date_obj = datetime.strptime(collected["start_date"], "%Y-%m-%d").date()
+    else:
+        start_date_obj = date.today()
+    file_no = generate_file_no(start_date_obj)
+
+    # العمر
+    age = None
+    if "birth_date" in collected:
+        birth = datetime.strptime(collected["birth_date"], "%Y-%m-%d").date()
+        age = calculate_age(birth)
+    elif "age" in collected:
+        age = int(collected["age"])
+
+    # الجنسية (نفترض أنها بالعربية)
+    nationality_ar = collected.get("nationality", "سعودي")
+    nationality_en = translate_arabic_to_english(nationality_ar)
+
+    # جهة العمل
+    employer_ar = collected.get("employer", "")
+    employer_en = translate_arabic_to_english(employer_ar)
+
+    # التواريخ
+    if "start_date" in collected:
+        start_date = datetime.strptime(collected["start_date"], "%Y-%m-%d").date()
+        leave_days = int(collected.get("leave_days", 1))
+        end_date = start_date + timedelta(days=leave_days - 1)
+        start_hijri = gregorian_to_hijri(start_date)
+        end_hijri = gregorian_to_hijri(end_date)
+        start_greg = start_date.strftime("%d-%m-%Y")
+        end_greg = end_date.strftime("%d-%m-%Y")
+    else:
+        # قيم افتراضية
+        start_hijri = end_hijri = ""
+        start_greg = end_greg = ""
+
+    # --- تعبئة البيانات للحقول ---
+    field_data = {}
+    # الحقول الثابتة
+    field_data["full_name_ar"] = collected.get("full_name", "")
+    field_data["full_name_en"] = translate_arabic_to_english(field_data["full_name_ar"])
+    field_data["file_no"] = file_no
+    if age:
+        field_data["age"] = str(age)
+    field_data["nationality_ar"] = nationality_ar
+    field_data["nationality_en"] = nationality_en
+    field_data["employer_ar"] = employer_ar
+    field_data["employer_en"] = employer_en
+    field_data["clinic_date_ar"] = start_hijri
+    field_data["clinic_date_en"] = start_greg
+    field_data["admission_date_ar"] = start_hijri
+    field_data["admission_date_en"] = start_greg
+    field_data["discharge_date_ar"] = end_hijri
+    field_data["discharge_date_en"] = end_greg
+    field_data["leave_days"] = str(leave_days) if 'leave_days' in locals() else ""
+    field_data["from_date_h"] = start_hijri
+    field_data["to_date_h"] = end_hijri
+    field_data["from_date_g"] = start_greg
+    field_data["to_date_g"] = end_greg
+    # تحديد الجنس (checkbox)
+    if data["gender"] == "ذكر":
+        field_data["male_checkbox"] = "Yes"
+    else:
+        field_data["female_checkbox"] = "Yes"
+
+    # --- اختيار القالب المناسب ---
+    template_path = data["template_male"] if data["gender"] == "ذكر" else data["template_female"]
+
+    # --- تعبئة PDF ---
+    output_stream = io.BytesIO()
     try:
-        # تاريخ بداية الإجازة
-        start_date_str = answers.get('start_date')
-        if start_date_str:
-            start_date = validate_date(start_date_str)
-            if not start_date:
-                raise ValueError("Invalid start date")
-        else:
-            start_date = date.today()
-
-        # رقم الملف
-        file_no = generate_file_no(start_date)
-
-        # العمر
-        birth_date_str = answers.get('birth_date')
-        age = None
-        if birth_date_str:
-            birth_date = validate_date(birth_date_str)
-            if birth_date:
-                age = calculate_age(birth_date)
-            else:
-                raise ValueError("Invalid birth date")
-        else:
-            age = answers.get('age', '')
-
-        # عدد الأيام
-        leave_days = int(answers.get('leave_days', 1))
-
-        # ترجمة النصوص
-        name_ar = answers.get('full_name_ar', '')
-        name_en = answers.get('full_name_en', '')
-        if name_ar and not name_en:
-            name_en = translate_ar_to_en(name_ar)
-
-        employer_ar = answers.get('employer', '')
-        employer_en = answers.get('employer_en', '')
-        if employer_ar and not employer_en:
-            employer_en = translate_ar_to_en(employer_ar)
-
-        nationality_ar = answers.get('nationality', '')
-        nationality_en = answers.get('nationality_en', '')
-        if nationality_ar and not nationality_en:
-            nationality_en = translate_ar_to_en(nationality_ar)
-
-        # التواريخ
-        clinic_date = start_date
-        discharge_date = start_date + timedelta(days=leave_days - 1)
-        clinic_date_hijri = gregorian_to_hijri_str(clinic_date)
-        discharge_date_hijri = gregorian_to_hijri_str(discharge_date)
-
-        fill_values = {
-            'full_name_ar': name_ar,
-            'full_name_en': name_en,
-            'file_no': file_no,
-            'age': str(age) if age else '',
-            'employer_ar': employer_ar,
-            'employer_en': employer_en,
-            'nationality_ar': nationality_ar,
-            'nationality_en': nationality_en,
-            'clinic_date_hijri': clinic_date_hijri,
-            'clinic_date_greg': clinic_date.strftime("%Y-%m-%d"),
-            'admission_date_hijri': clinic_date_hijri,
-            'admission_date_greg': clinic_date.strftime("%Y-%m-%d"),
-            'discharge_date_hijri': discharge_date_hijri,
-            'discharge_date_greg': discharge_date.strftime("%Y-%m-%d"),
-            'leave_days': str(leave_days),
-            'from_date_hijri': clinic_date_hijri,
-            'to_date_hijri': discharge_date_hijri,
-            'from_date_greg': clinic_date.strftime("%Y-%m-%d"),
-            'to_date_greg': discharge_date.strftime("%Y-%m-%d"),
-            'male_checkbox': 'Yes' if gender == 'ذكر' else 'Off',
-            'female_checkbox': 'Yes' if gender == 'أنثى' else 'Off',
-        }
-
-        # اختيار القالب
-        template_path = template['male_path'] if gender == 'ذكر' else template['female_path']
-        if not os.path.exists(template_path):
-            await message.answer("❌ ملف القالب غير موجود على السيرفر.")
-            await state.finish()
-            return
-
-        # تعبئة PDF
-        doc = fitz.open(template_path)
-        filled_count = 0
-        for page in doc:
-            widgets = page.widgets()
-            if widgets:
-                for w in widgets:
-                    field_name = w.field_name
-                    if field_name in template['fields_to_fill'] and field_name in fill_values:
-                        w.field_value = str(fill_values[field_name])
-                        w.update()
-                        filled_count += 1
-        if filled_count == 0:
-            logging.warning(f"No fields were filled in template {template_path}")
-            # قد نكمل مع تحذير فقط
-
-        output_stream = io.BytesIO()
-        doc.save(output_stream)
-        doc.close()
-        output_stream.seek(0)
-
-        # خصم الرصيد
-        database.update_balance(user_id, -3, "report")
-
-        # حفظ التقرير
-        database.save_report(user_id, doctor_id, name_ar, gender)
-
-        # إرسال الملف
-        await bot.send_document(user_id, InputFile(output_stream, filename="تقرير_طبي.pdf"))
-
-        # فحص الرصيد المنخفض
-        balance = database.get_balance(user_id)
-        if balance < 3:
-            await bot.send_message(user_id, "⚠ رصيدك أوشك على الانتهاء.\nالرجاء إعادة الشحن لإصدار تقاريرك بنجاح ✅")
-
-        await message.answer("✅ تم إنشاء التقرير بنجاح.", reply_markup=get_correct_keyboard(user_id))
-
+        fill_pdf_form(template_path, output_stream, field_data)
     except Exception as e:
-        logging.exception(f"Error during report generation: {e}")
-        await message.answer("❌ حدث خطأ أثناء إنشاء التقرير. يرجى المحاولة لاحقاً.")
-    finally:
+        await message.answer(f"❌ حدث خطأ أثناء تعبئة التقرير: {e}")
         await state.finish()
+        return
+
+    output_stream.seek(0)
+
+    # --- خصم الرصيد وحفظ التقرير ---
+    database.update_balance(user_id, -3, "report")
+    database.save_report(user_id, data["doctor_id"], collected.get("full_name", ""), data["gender"])
+
+    # --- إرسال الملف ---
+    await bot.send_document(user_id, InputFile(output_stream, filename="تقرير_طبي.pdf"))
+
+    # --- فحص الرصيد المنخفض ---
+    await check_low_balance(user_id)
+
+    await message.answer("✅ تم إنشاء التقرير بنجاح.", reply_markup=get_correct_keyboard(user_id))
+    await state.finish()
+
+async def check_low_balance(user_id):
+    balance = database.get_balance(user_id)
+    if balance < 3:
+        try:
+            await bot.send_message(user_id, "⚠ رصيدك أوشك على الانتهاء.\nالرجاء إعادة الشحن لإصدار تقاريرك بنجاح ✅")
+        except:
+            pass
 
 # ========== لوحة المطور ==========
 @dp.message_handler(lambda m: m.text == "👑 لوحة المطور")
@@ -667,21 +648,756 @@ async def admin_panel(message: types.Message):
         return
     await message.answer("👑 لوحة التحكم", reply_markup=admin_keyboard())
 
-# ========== إدارة الرصيد (كما هي مع تحسينات) ==========
-# (نفس الكود السابق، مع إضافة try/except حول update_balance)
-
-# ========== إدارة المناطق والمستشفيات والأقسام والأطباء (كما هي مع تصحيح العلاقات) ==========
-# (جميع المعالجات السابقة تبقى، لكن نستخدم الدوال الجديدة get_doctor, get_department, get_hospital, get_region)
-
-# ========== إعداد وتعديل نظام التقارير (محدث) ==========
-@dp.message_handler(lambda m: m.text == "🛠 إعداد وتعديل نظام التقارير")
-async def templates_management_menu(message: types.Message):
+# ========== إدارة الرصيد (كما هي) ==========
+@dp.message_handler(lambda m: m.text == "💰 إدارة الرصيد")
+async def balance_management(message: types.Message):
     if str(message.from_user.id) != ADMIN_ID:
         return
-    await message.answer("إعداد وتعديل نظام التقارير:", reply_markup=templates_management_keyboard())
+    await message.answer("إدارة الرصيد:", reply_markup=balance_management_keyboard())
 
-@dp.message_handler(lambda m: m.text == "📄 إدارة القوالب")
-async def manage_templates_start(message: types.Message):
+# إضافة رصيد
+@dp.message_handler(lambda m: m.text == "➕ إضافة رصيد")
+async def add_balance_start(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    await message.answer("أرسل آيدي المستخدم:", reply_markup=cancel_keyboard())
+    await AddBalance.user_id.set()
+
+@dp.message_handler(state=AddBalance.user_id)
+async def add_balance_user(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    if not message.text.isdigit():
+        await message.answer("❌ آيدي غير صحيح.")
+        return
+    await state.update_data(user_id=int(message.text))
+    await message.answer("أرسل المبلغ:", reply_markup=cancel_keyboard())
+    await AddBalance.amount.set()
+
+@dp.message_handler(state=AddBalance.amount)
+async def add_balance_amount(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    try:
+        amount = float(message.text)
+        if amount <= 0 or amount > 10000:
+            raise ValueError
+    except:
+        await message.answer("❌ مبلغ غير صحيح (1 - 10000)")
+        return
+    await state.update_data(amount=amount)
+    await message.answer("هل تريد إرسال إشعار للمستخدم؟", reply_markup=yes_no_keyboard())
+    await AddBalance.confirm_notify.set()
+
+@dp.message_handler(state=AddBalance.confirm_notify)
+async def add_balance_confirm(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    data = await state.get_data()
+    user_id = data["user_id"]
+    amount = data["amount"]
+    database.update_balance(user_id, amount, "add")
+    if message.text == "✅ نعم":
+        try:
+            await bot.send_message(user_id, f"💰 تم إضافة {amount} ريال إلى حسابك.\nرصيدك الحالي: {database.get_balance(user_id)} ريال")
+        except:
+            pass
+    await message.answer("✅ تم تنفيذ العملية.", reply_markup=balance_management_keyboard())
+    await state.finish()
+
+# خصم رصيد
+@dp.message_handler(lambda m: m.text == "➖ خصم رصيد")
+async def deduct_balance_start(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    await message.answer("أرسل آيدي المستخدم:", reply_markup=cancel_keyboard())
+    await DeductBalance.user_id.set()
+
+@dp.message_handler(state=DeductBalance.user_id)
+async def deduct_balance_user(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    if not message.text.isdigit():
+        await message.answer("❌ آيدي غير صحيح.")
+        return
+    await state.update_data(user_id=int(message.text))
+    await message.answer("أرسل المبلغ:", reply_markup=cancel_keyboard())
+    await DeductBalance.amount.set()
+
+@dp.message_handler(state=DeductBalance.amount)
+async def deduct_balance_amount(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    try:
+        amount = float(message.text)
+        if amount <= 0 or amount > 10000:
+            raise ValueError
+    except:
+        await message.answer("❌ مبلغ غير صحيح.")
+        return
+    await state.update_data(amount=amount)
+    await message.answer("هل تريد إرسال إشعار للمستخدم؟", reply_markup=yes_no_keyboard())
+    await DeductBalance.confirm_notify.set()
+
+@dp.message_handler(state=DeductBalance.confirm_notify)
+async def deduct_balance_confirm(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    data = await state.get_data()
+    user_id = data["user_id"]
+    amount = data["amount"]
+    database.update_balance(user_id, -amount, "deduct")
+    if message.text == "✅ نعم":
+        try:
+            await bot.send_message(user_id, f"⚠ تم خصم {amount} ريال من حسابك.\nرصيدك الحالي: {database.get_balance(user_id)} ريال")
+        except:
+            pass
+    await message.answer("✅ تم تنفيذ العملية.", reply_markup=balance_management_keyboard())
+    await state.finish()
+
+# معلومات مستخدم
+@dp.message_handler(lambda m: m.text == "👤 معلومات مستخدم")
+async def info_user_start(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    await message.answer("أرسل آيدي المستخدم:", reply_markup=cancel_keyboard())
+    await InfoUser.user_id.set()
+
+@dp.message_handler(state=InfoUser.user_id)
+async def info_user_execute(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    if not message.text.isdigit():
+        await message.answer("❌ آيدي غير صحيح.")
+        return
+    user_id = int(message.text)
+    user = database.get_user(user_id)
+    if not user:
+        await message.answer("المستخدم غير موجود.")
+        await state.finish()
+        return
+    balance = database.get_balance(user_id)
+    status = "محظور 🚫" if user[5] == 1 else "نشط ✅"
+    last_tx = database.get_last_transaction(user_id)
+    tx_text = "لا توجد عمليات."
+    if last_tx:
+        tx_text = f"{last_tx[1]} | {last_tx[0]} | {last_tx[2]}"
+    await message.answer(
+        f"👤 معلومات المستخدم:\n\n"
+        f"🆔 ID: {user_id}\n"
+        f"💰 الرصيد: {balance}\n"
+        f"📌 الحالة: {status}\n"
+        f"🧾 آخر عملية: {tx_text}\n"
+        f"📅 تاريخ التسجيل: {user[6]}",
+        reply_markup=balance_management_keyboard()
+    )
+    await state.finish()
+
+# حظر
+@dp.message_handler(lambda m: m.text == "🚫 حظر")
+async def ban_start(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    await message.answer("أرسل آيدي المستخدم للحظر:", reply_markup=cancel_keyboard())
+    await BanUser.user_id.set()
+
+@dp.message_handler(state=BanUser.user_id)
+async def ban_execute(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    if not message.text.isdigit():
+        await message.answer("❌ آيدي غير صحيح.")
+        return
+    user_id = int(message.text)
+    database.ban_user(user_id, 1)
+    try:
+        await bot.send_message(user_id, "🚫 تم حظر حسابك من استخدام البوت.")
+    except:
+        pass
+    await message.answer("🚫 تم الحظر وإرسال إشعار.", reply_markup=balance_management_keyboard())
+    await state.finish()
+
+# فك حظر
+@dp.message_handler(lambda m: m.text == "🔓 فك حظر")
+async def unban_start(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    await message.answer("أرسل آيدي المستخدم لفك الحظر:", reply_markup=cancel_keyboard())
+    await UnbanUser.user_id.set()
+
+@dp.message_handler(state=UnbanUser.user_id)
+async def unban_execute(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    if not message.text.isdigit():
+        await message.answer("❌ آيدي غير صحيح.")
+        return
+    user_id = int(message.text)
+    database.ban_user(user_id, 0)
+    try:
+        await bot.send_message(user_id, "🎉 تم فك الحظر عن حسابك.\nالآن يمكنك استخدام البوت بكامل ميزاته الخرافية 😍✔️")
+    except:
+        pass
+    await message.answer("✅ تم فك الحظر وإرسال إشعار.", reply_markup=balance_management_keyboard())
+    await state.finish()
+
+# ========== إدارة المناطق (كما هي) ==========
+@dp.message_handler(lambda m: m.text == "📍 إدارة المناطق")
+async def manage_regions_menu(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("📍 عرض المناطق", "➕ إضافة منطقة", "🗑 حذف منطقة")
+    kb.add("🔙 رجوع")
+    await message.answer("إدارة المناطق:", reply_markup=kb)
+
+@dp.message_handler(lambda m: m.text == "📍 عرض المناطق")
+async def list_regions(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    regions = database.get_regions()
+    if not regions:
+        await message.answer("لا توجد مناطق مسجلة.", reply_markup=admin_keyboard())
+        return
+    text = "المناطق المسجلة:\n\n"
+    for r in regions:
+        text += f"🆔 {r[0]} | {r[1]}\n"
+    await message.answer(text, reply_markup=admin_keyboard())
+
+@dp.message_handler(lambda m: m.text == "➕ إضافة منطقة")
+async def add_region_start(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    await message.answer("أرسل اسم المنطقة الجديدة:", reply_markup=cancel_keyboard())
+    await AddRegion.name.set()
+
+@dp.message_handler(state=AddRegion.name)
+async def add_region_name(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    name = message.text.strip()
+    if name:
+        database.add_region(name)
+        await message.answer(f"✅ تم إضافة المنطقة '{name}'", reply_markup=admin_keyboard())
+    else:
+        await message.answer("❌ اسم غير صالح.")
+    await state.finish()
+
+@dp.message_handler(lambda m: m.text == "🗑 حذف منطقة")
+async def delete_region_start(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    regions = database.get_regions()
+    if not regions:
+        await message.answer("لا توجد مناطق مسجلة.", reply_markup=admin_keyboard())
+        return
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    for r in regions:
+        kb.add(f"🗑 {r[1]}")
+    kb.add("🔙 رجوع")
+    await message.answer("اختر المنطقة للحذف:", reply_markup=kb)
+    await DeleteRegion.choose.set()
+
+@dp.message_handler(state=DeleteRegion.choose)
+async def delete_region_execute(message: types.Message, state: FSMContext):
+    if message.text == "🔙 رجوع":
+        await manage_regions_menu(message)
+        await state.finish()
+        return
+    region_name = message.text.replace("🗑 ", "")
+    regions = database.get_regions()
+    region_id = None
+    for r in regions:
+        if r[1] == region_name:
+            region_id = r[0]
+            break
+    if region_id:
+        database.delete_region(region_id)
+        await message.answer(f"✅ تم حذف المنطقة '{region_name}'", reply_markup=admin_keyboard())
+    else:
+        await message.answer("❌ المنطقة غير موجودة.")
+    await state.finish()
+
+# ========== إدارة المستشفيات (كما هي) ==========
+@dp.message_handler(lambda m: m.text == "🏥 إدارة المستشفيات")
+async def manage_hospitals_menu(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("🏥 عرض المستشفيات", "➕ إضافة مستشفى", "🗑 حذف مستشفى")
+    kb.add("🔙 رجوع")
+    await message.answer("إدارة المستشفيات:", reply_markup=kb)
+
+@dp.message_handler(lambda m: m.text == "🏥 عرض المستشفيات")
+async def list_hospitals(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    hospitals = database.get_hospitals()
+    if not hospitals:
+        await message.answer("لا توجد مستشفيات مسجلة.", reply_markup=admin_keyboard())
+        return
+    text = "المستشفيات المسجلة:\n\n"
+    for h in hospitals:
+        text += f"🆔 {h[0]} | {h[2]}\n"
+    await message.answer(text, reply_markup=admin_keyboard())
+
+@dp.message_handler(lambda m: m.text == "➕ إضافة مستشفى")
+async def add_hospital_start(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    regions = database.get_regions()
+    if not regions:
+        await message.answer("يجب إضافة منطقة أولاً.", reply_markup=admin_keyboard())
+        return
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    for r in regions:
+        kb.add(f"📍 {r[1]}")
+    kb.add("🔙 رجوع")
+    await message.answer("اختر المنطقة:", reply_markup=kb)
+    await AddHospital.region.set()
+
+@dp.message_handler(state=AddHospital.region)
+async def add_hospital_region(message: types.Message, state: FSMContext):
+    if message.text == "🔙 رجوع":
+        await manage_hospitals_menu(message)
+        await state.finish()
+        return
+    region_name = message.text.replace("📍 ", "")
+    regions = database.get_regions()
+    region_id = None
+    for r in regions:
+        if r[1] == region_name:
+            region_id = r[0]
+            break
+    if not region_id:
+        await message.answer("❌ منطقة غير صحيحة.")
+        return
+    await state.update_data(region_id=region_id)
+    await message.answer("أرسل اسم المستشفى:", reply_markup=cancel_keyboard())
+    await AddHospital.name.set()
+
+@dp.message_handler(state=AddHospital.name)
+async def add_hospital_name(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    name = message.text.strip()
+    if name:
+        data = await state.get_data()
+        database.add_hospital(data["region_id"], name)
+        await message.answer(f"✅ تم إضافة المستشفى '{name}'", reply_markup=admin_keyboard())
+    else:
+        await message.answer("❌ اسم غير صالح.")
+    await state.finish()
+
+@dp.message_handler(lambda m: m.text == "🗑 حذف مستشفى")
+async def delete_hospital_start(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    hospitals = database.get_hospitals()
+    if not hospitals:
+        await message.answer("لا توجد مستشفيات مسجلة.", reply_markup=admin_keyboard())
+        return
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    for h in hospitals:
+        kb.add(f"🗑 {h[2]}")
+    kb.add("🔙 رجوع")
+    await message.answer("اختر المستشفى للحذف:", reply_markup=kb)
+    await DeleteHospital.choose.set()
+
+@dp.message_handler(state=DeleteHospital.choose)
+async def delete_hospital_execute(message: types.Message, state: FSMContext):
+    if message.text == "🔙 رجوع":
+        await manage_hospitals_menu(message)
+        await state.finish()
+        return
+    hospital_name = message.text.replace("🗑 ", "")
+    hospitals = database.get_hospitals()
+    hospital_id = None
+    for h in hospitals:
+        if h[2] == hospital_name:
+            hospital_id = h[0]
+            break
+    if hospital_id:
+        database.delete_hospital(hospital_id)
+        await message.answer(f"✅ تم حذف المستشفى '{hospital_name}'", reply_markup=admin_keyboard())
+    else:
+        await message.answer("❌ المستشفى غير موجود.")
+    await state.finish()
+
+# ========== إدارة الأقسام (كما هي) ==========
+@dp.message_handler(lambda m: m.text == "🩺 إدارة الأقسام")
+async def manage_departments_menu(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("🩺 عرض الأقسام", "➕ إضافة قسم", "🗑 حذف قسم")
+    kb.add("🔙 رجوع")
+    await message.answer("إدارة الأقسام:", reply_markup=kb)
+
+@dp.message_handler(lambda m: m.text == "🩺 عرض الأقسام")
+async def list_departments(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    departments = database.get_departments()
+    if not departments:
+        await message.answer("لا توجد أقسام مسجلة.", reply_markup=admin_keyboard())
+        return
+    text = "الأقسام المسجلة:\n\n"
+    for d in departments:
+        text += f"🆔 {d[0]} | {d[2]}\n"
+    await message.answer(text, reply_markup=admin_keyboard())
+
+@dp.message_handler(lambda m: m.text == "➕ إضافة قسم")
+async def add_department_start(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    regions = database.get_regions()
+    if not regions:
+        await message.answer("يجب إضافة منطقة أولاً.", reply_markup=admin_keyboard())
+        return
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    for r in regions:
+        kb.add(f"📍 {r[1]}")
+    kb.add("🔙 رجوع")
+    await message.answer("اختر المنطقة:", reply_markup=kb)
+    await AddDepartment.region.set()
+
+@dp.message_handler(state=AddDepartment.region)
+async def add_department_region(message: types.Message, state: FSMContext):
+    if message.text == "🔙 رجوع":
+        await manage_departments_menu(message)
+        await state.finish()
+        return
+    region_name = message.text.replace("📍 ", "")
+    regions = database.get_regions()
+    region_id = None
+    for r in regions:
+        if r[1] == region_name:
+            region_id = r[0]
+            break
+    if not region_id:
+        await message.answer("❌ منطقة غير صحيحة.")
+        return
+    await state.update_data(region_id=region_id)
+    hospitals = database.get_hospitals(region_id)
+    if not hospitals:
+        await message.answer("لا توجد مستشفيات في هذه المنطقة.")
+        await state.finish()
+        return
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    for h in hospitals:
+        kb.add(f"🏥 {h[2]}")
+    kb.add("🔙 رجوع")
+    await message.answer("اختر المستشفى:", reply_markup=kb)
+    await AddDepartment.hospital.set()
+
+@dp.message_handler(state=AddDepartment.hospital)
+async def add_department_hospital(message: types.Message, state: FSMContext):
+    if message.text == "🔙 رجوع":
+        await manage_departments_menu(message)
+        await state.finish()
+        return
+    hospital_name = message.text.replace("🏥 ", "")
+    data = await state.get_data()
+    hospitals = database.get_hospitals(data["region_id"])
+    hospital_id = None
+    for h in hospitals:
+        if h[2] == hospital_name:
+            hospital_id = h[0]
+            break
+    if not hospital_id:
+        await message.answer("❌ مستشفى غير صحيح.")
+        return
+    await state.update_data(hospital_id=hospital_id)
+    await message.answer("أرسل اسم القسم:", reply_markup=cancel_keyboard())
+    await AddDepartment.name.set()
+
+@dp.message_handler(state=AddDepartment.name)
+async def add_department_name(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    name = message.text.strip()
+    if name:
+        data = await state.get_data()
+        database.add_department(data["hospital_id"], name)
+        await message.answer(f"✅ تم إضافة القسم '{name}'", reply_markup=admin_keyboard())
+    else:
+        await message.answer("❌ اسم غير صالح.")
+    await state.finish()
+
+@dp.message_handler(lambda m: m.text == "🗑 حذف قسم")
+async def delete_department_start(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    departments = database.get_departments()
+    if not departments:
+        await message.answer("لا توجد أقسام مسجلة.", reply_markup=admin_keyboard())
+        return
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    for d in departments:
+        kb.add(f"🗑 {d[2]}")
+    kb.add("🔙 رجوع")
+    await message.answer("اختر القسم للحذف:", reply_markup=kb)
+    await DeleteDepartment.choose.set()
+
+@dp.message_handler(state=DeleteDepartment.choose)
+async def delete_department_execute(message: types.Message, state: FSMContext):
+    if message.text == "🔙 رجوع":
+        await manage_departments_menu(message)
+        await state.finish()
+        return
+    department_name = message.text.replace("🗑 ", "")
+    departments = database.get_departments()
+    department_id = None
+    for d in departments:
+        if d[2] == department_name:
+            department_id = d[0]
+            break
+    if department_id:
+        database.delete_department(department_id)
+        await message.answer(f"✅ تم حذف القسم '{department_name}'", reply_markup=admin_keyboard())
+    else:
+        await message.answer("❌ القسم غير موجود.")
+    await state.finish()
+
+# ========== إدارة الأطباء (محدثة لتحميل القوالب) ==========
+@dp.message_handler(lambda m: m.text == "👨‍⚕️ إدارة الأطباء")
+async def manage_doctors_menu(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("👨‍⚕️ عرض الأطباء", "➕ إضافة طبيب", "🗑 حذف طبيب")
+    kb.add("🔙 رجوع")
+    await message.answer("إدارة الأطباء:", reply_markup=kb)
+
+@dp.message_handler(lambda m: m.text == "👨‍⚕️ عرض الأطباء")
+async def list_doctors(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    doctors = database.get_doctors()
+    if not doctors:
+        await message.answer("لا يوجد أطباء مسجلين.", reply_markup=admin_keyboard())
+        return
+    text = "الأطباء المسجلون:\n\n"
+    for doc in doctors:
+        text += f"🆔 {doc[0]} | {doc[3]} - {doc[4]}\n"
+    await message.answer(text, reply_markup=admin_keyboard())
+
+@dp.message_handler(lambda m: m.text == "➕ إضافة طبيب")
+async def add_doctor_start(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    regions = database.get_regions()
+    if not regions:
+        await message.answer("يجب إضافة منطقة أولاً.", reply_markup=admin_keyboard())
+        return
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    for r in regions:
+        kb.add(f"📍 {r[1]}")
+    kb.add("🔙 رجوع")
+    await message.answer("اختر المنطقة:", reply_markup=kb)
+    await AddDoctor.region.set()
+
+@dp.message_handler(state=AddDoctor.region)
+async def add_doctor_region(message: types.Message, state: FSMContext):
+    if message.text == "🔙 رجوع":
+        await manage_doctors_menu(message)
+        await state.finish()
+        return
+    region_name = message.text.replace("📍 ", "")
+    regions = database.get_regions()
+    region_id = None
+    for r in regions:
+        if r[1] == region_name:
+            region_id = r[0]
+            break
+    if not region_id:
+        await message.answer("❌ منطقة غير صحيحة.")
+        return
+    await state.update_data(region_id=region_id, region_name=region_name)
+    hospitals = database.get_hospitals(region_id)
+    if not hospitals:
+        await message.answer("لا توجد مستشفيات في هذه المنطقة.")
+        await state.finish()
+        return
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    for h in hospitals:
+        kb.add(f"🏥 {h[2]}")
+    kb.add("🔙 رجوع")
+    await message.answer("اختر المستشفى:", reply_markup=kb)
+    await AddDoctor.hospital.set()
+
+@dp.message_handler(state=AddDoctor.hospital)
+async def add_doctor_hospital(message: types.Message, state: FSMContext):
+    if message.text == "🔙 رجوع":
+        await manage_doctors_menu(message)
+        await state.finish()
+        return
+    hospital_name = message.text.replace("🏥 ", "")
+    data = await state.get_data()
+    hospitals = database.get_hospitals(data["region_id"])
+    hospital_id = None
+    for h in hospitals:
+        if h[2] == hospital_name:
+            hospital_id = h[0]
+            break
+    if not hospital_id:
+        await message.answer("❌ مستشفى غير صحيح.")
+        return
+    await state.update_data(hospital_id=hospital_id, hospital_name=hospital_name)
+    departments = database.get_departments(hospital_id)
+    if not departments:
+        await message.answer("لا توجد أقسام في هذا المستشفى.")
+        await state.finish()
+        return
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    for d in departments:
+        kb.add(f"🩺 {d[2]}")
+    kb.add("🔙 رجوع")
+    await message.answer("اختر القسم:", reply_markup=kb)
+    await AddDoctor.department.set()
+
+@dp.message_handler(state=AddDoctor.department)
+async def add_doctor_department(message: types.Message, state: FSMContext):
+    if message.text == "🔙 رجوع":
+        await manage_doctors_menu(message)
+        await state.finish()
+        return
+    department_name = message.text.replace("🩺 ", "")
+    data = await state.get_data()
+    departments = database.get_departments(data["hospital_id"])
+    department_id = None
+    for d in departments:
+        if d[2] == department_name:
+            department_id = d[0]
+            break
+    if not department_id:
+        await message.answer("❌ قسم غير صحيح.")
+        return
+    await state.update_data(department_id=department_id, department_name=department_name)
+    await message.answer("أرسل اسم الطبيب:", reply_markup=cancel_keyboard())
+    await AddDoctor.name.set()
+
+@dp.message_handler(state=AddDoctor.name)
+async def add_doctor_name(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    name = message.text.strip()
+    if not name:
+        await message.answer("❌ اسم غير صالح.")
+        return
+    await state.update_data(name=name)
+    await message.answer("أرسل المسمى الوظيفي (مثل: استشاري باطنية):", reply_markup=cancel_keyboard())
+    await AddDoctor.title.set()
+
+@dp.message_handler(state=AddDoctor.title)
+async def add_doctor_title(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    title = message.text.strip()
+    if not title:
+        await message.answer("❌ مسمى غير صالح.")
+        return
+    await state.update_data(title=title)
+    await message.answer("الرجاء رفع ملف PDF الخاص بالمرضى الذكور:", reply_markup=cancel_keyboard())
+    await AddDoctor.pdf_male.set()
+
+@dp.message_handler(content_types=['document'], state=AddDoctor.pdf_male)
+async def add_doctor_pdf_male(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    if not message.document:
+        await message.answer("❌ يرجى رفع ملف PDF.")
+        return
+    # التحقق من أن الملف PDF
+    if not message.document.file_name.endswith('.pdf'):
+        await message.answer("❌ الملف ليس PDF.")
+        return
+    file_id = message.document.file_id
+    await state.update_data(pdf_male_id=file_id)
+    await message.answer("تم استلام ملف الذكور. الآن رفع ملف PDF الخاص بالمرضى الإناث:", reply_markup=cancel_keyboard())
+    await AddDoctor.pdf_female.set()
+
+@dp.message_handler(content_types=['document'], state=AddDoctor.pdf_female)
+async def add_doctor_pdf_female(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    if not message.document:
+        await message.answer("❌ يرجى رفع ملف PDF.")
+        return
+    if not message.document.file_name.endswith('.pdf'):
+        await message.answer("❌ الملف ليس PDF.")
+        return
+    file_id_female = message.document.file_id
+    data = await state.get_data()
+
+    # تحميل الملفين
+    male_file_id = data["pdf_male_id"]
+    male_file_info = await bot.get_file(male_file_id)
+    male_bytes = await bot.download_file(male_file_info.file_path)
+
+    female_file_info = await bot.get_file(file_id_female)
+    female_bytes = await bot.download_file(female_file_info.file_path)
+
+    # حفظ الملفات محلياً
+    region_name = data["region_name"]
+    hospital_name = data["hospital_name"]
+    department_name = data["department_name"]
+
+    male_path = get_template_path(region_name, hospital_name, department_name, "male")
+    female_path = get_template_path(region_name, hospital_name, department_name, "female")
+
+    with open(male_path, "wb") as f:
+        f.write(male_bytes.getvalue())
+    with open(female_path, "wb") as f:
+        f.write(female_bytes.getvalue())
+
+    # التحقق من أن الملفات تحتوي على حقول
+    try:
+        fields_male = extract_form_fields(male_path)
+        fields_female = extract_form_fields(female_path)
+    except Exception as e:
+        await message.answer(f"❌ الملف لا يحتوي على حقول تعبئة: {e}")
+        return
+
+    # إضافة الطبيب إلى قاعدة البيانات
+    doctor_id = database.add_doctor(
+        data["department_id"],
+        data["name"],
+        data["title"],
+        male_path,
+        female_path
+    )
+
+    # حفظ الحقول في جدول template_fields
+    all_fields = set(fields_male + fields_female)
+    database.set_template_fields(doctor_id, list(all_fields))
+
+    # تعيين مجموعة افتراضية من البيانات المطلوبة (يمكن تعديلها لاحقاً)
+    default_required = ["full_name", "birth_date", "employer", "nationality", "start_date", "leave_days"]
+    database.set_required_data(doctor_id, default_required)
+
+    await message.answer(f"✅ تم إضافة الطبيب '{data['name']}' بنجاح مع القوالب.", reply_markup=admin_keyboard())
+    await state.finish()
+
+@dp.message_handler(lambda m: m.text == "🗑 حذف طبيب")
+async def delete_doctor_start(message: types.Message):
     if str(message.from_user.id) != ADMIN_ID:
         return
     doctors = database.get_doctors()
@@ -690,230 +1406,262 @@ async def manage_templates_start(message: types.Message):
         return
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     for doc in doctors:
-        kb.add(f"👨‍⚕️ {doc[3]} (ID: {doc[0]})")
+        kb.add(f"🗑 {doc[3]}")
     kb.add("🔙 رجوع")
-    await message.answer("اختر الطبيب الذي تريد إدارة قوالبه:", reply_markup=kb)
+    await message.answer("اختر الطبيب للحذف:", reply_markup=kb)
+    await DeleteDoctor.choose.set()
+
+@dp.message_handler(state=DeleteDoctor.choose)
+async def delete_doctor_execute(message: types.Message, state: FSMContext):
+    if message.text == "🔙 رجوع":
+        await manage_doctors_menu(message)
+        await state.finish()
+        return
+    doctor_name = message.text.replace("🗑 ", "")
+    doctors = database.get_doctors()
+    doctor_id = None
+    for doc in doctors:
+        if doc[3] == doctor_name:
+            doctor_id = doc[0]
+            break
+    if doctor_id:
+        database.delete_doctor(doctor_id)
+        await message.answer(f"✅ تم حذف الطبيب '{doctor_name}'", reply_markup=admin_keyboard())
+    else:
+        await message.answer("❌ الطبيب غير موجود.")
+    await state.finish()
+
+# ========== إعداد وتعديل نظام التقارير (جديد) ==========
+@dp.message_handler(lambda m: m.text == "🛠 إعداد وتعديل نظام التقارير")
+async def manage_templates_menu(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    # عرض قائمة الأطباء لتعديل إعداداتهم
+    doctors = database.get_doctors()
+    if not doctors:
+        await message.answer("لا يوجد أطباء مسجلين.", reply_markup=admin_keyboard())
+        return
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    for doc in doctors:
+        kb.add(f"🔧 {doc[3]}")
+    kb.add("🔙 رجوع")
+    await message.answer("اختر الطبيب لتعديل إعدادات تقاريره:", reply_markup=kb)
     await ManageTemplates.choose_doctor.set()
 
 @dp.message_handler(state=ManageTemplates.choose_doctor)
-async def manage_templates_choose_doctor(message: types.Message, state: FSMContext):
+async def choose_doctor_for_template(message: types.Message, state: FSMContext):
     if message.text == "🔙 رجوع":
-        await templates_management_menu(message)
+        await admin_panel(message)
         await state.finish()
         return
-    match = re.search(r'ID: (\d+)', message.text)
-    if not match:
-        await message.answer("❌ لم أتمكن من تحديد الطبيب.")
+    doctor_name = message.text.replace("🔧 ", "")
+    doctors = database.get_doctors()
+    doctor_id = None
+    for doc in doctors:
+        if doc[3] == doctor_name:
+            doctor_id = doc[0]
+            break
+    if not doctor_id:
+        await message.answer("❌ طبيب غير صحيح.")
         return
-    doctor_id = int(match.group(1))
-    doctor = database.get_doctor(doctor_id)
-    if not doctor:
-        await message.answer("❌ الطبيب غير موجود.")
+    await state.update_data(doctor_id=doctor_id, doctor_name=doctor_name)
+
+    # عرض الحقول الموجودة في قوالب الطبيب
+    fields = database.get_template_fields(doctor_id)
+    if not fields:
+        await message.answer("لا توجد حقول مسجلة لهذا الطبيب. ربما لم يتم رفع القوالب بعد.")
+        await state.finish()
         return
-    await state.update_data(doctor_id=doctor_id, doctor_name=doctor[3])
+
+    # عرض الحقول كأزرار مع إمكانية تحديدها
+    # سنقوم بإنشاء لوحة ديناميكية: كل حقل يظهر مع علامة ✅ أو ❌ حسب is_used (الافتراضي 1)
+    # نستخدم زر خاص "تم الاختيار" للانتقال للمرحلة التالية
+    # هنا نبسط: نطلب من المطور إرسال أسماء الحقول التي يريد استخدامها مفصولة بفواصل
+    field_list = "\n".join(fields)
+    await message.answer(
+        f"الحقول المتوفرة في قوالب هذا الطبيب:\n{field_list}\n\n"
+        "أرسل أسماء الحقول التي تريد تعبئتها (مفصولة بفواصل)، أو أرسل 'الكل' لاختيار الكل، أو 'تخطي' لاستخدام الكل.",
+        reply_markup=cancel_keyboard()
+    )
+    await ManageTemplates.show_fields.set()
+
+@dp.message_handler(state=ManageTemplates.show_fields)
+async def select_fields(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    data = await state.get_data()
+    doctor_id = data["doctor_id"]
+    all_fields = database.get_template_fields(doctor_id)
+
+    if message.text == "الكل":
+        selected = all_fields
+    elif message.text == "تخطي":
+        selected = all_fields
+    else:
+        # نفصل بفواصل وننظف
+        parts = [p.strip() for p in message.text.split(',')]
+        selected = [p for p in parts if p in all_fields]
+
+    if not selected:
+        await message.answer("لم تختار أي حقل صحيح. حاول مرة أخرى.")
+        return
+
+    # حفظ الحقول المختارة في قاعدة البيانات (is_used)
+    database.set_template_fields(doctor_id, selected)
+
+    # الآن نطلب البيانات المطلوب جمعها من المستخدم
+    # نعرض قائمة بالبيانات الممكنة
+    possible_data = [
+        "full_name", "birth_date", "employer", "nationality",
+        "start_date", "leave_days", "age", "file_no"
+    ]
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("رفع قالب ذكر", "رفع قالب أنثى")
+    for item in possible_data:
+        kb.add(f"📌 {item}")
+    kb.add("✅ انتهيت")
+    kb.add("❌ إلغاء العملية")
+    await message.answer(
+        "اختر البيانات التي تريد أن يطلبها النظام من المستخدم (اضغط على كل عنصر، ثم انتهيت):",
+        reply_markup=kb
+    )
+    await state.update_data(selected_data=[])
+    await ManageTemplates.select_required_data.set()
+
+@dp.message_handler(state=ManageTemplates.select_required_data)
+async def select_required_data(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    if message.text == "✅ انتهيت":
+        data = await state.get_data()
+        selected = data.get("selected_data", [])
+        doctor_id = data["doctor_id"]
+        # حفظ في قاعدة البيانات
+        database.set_required_data(doctor_id, selected)
+        await message.answer("✅ تم حفظ إعدادات التقرير.", reply_markup=admin_keyboard())
+        await state.finish()
+        return
+    # وإلا نضيف العنصر إلى القائمة
+    item = message.text.replace("📌 ", "")
+    if item in ["full_name", "birth_date", "employer", "nationality", "start_date", "leave_days", "age", "file_no"]:
+        data = await state.get_data()
+        selected = data.get("selected_data", [])
+        if item not in selected:
+            selected.append(item)
+            await state.update_data(selected_data=selected)
+            await message.answer(f"✅ تمت إضافة {item}. يمكنك اختيار المزيد أو الضغط على 'انتهيت'.")
+        else:
+            await message.answer(f"❗ {item} مضاف بالفعل.")
+    else:
+        await message.answer("❌ اختيار غير صحيح.")
+
+# ========== الإحصائيات ==========
+@dp.message_handler(lambda m: m.text == "📊 الإحصائيات")
+async def stats(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    stats = database.get_report_stats()
+    text = (
+        f"📊 إحصائيات عامة:\n\n"
+        f"📄 عدد التقارير المنشأة: {stats['total_reports']}\n"
+        f"💰 إجمالي الأرباح: {stats['total_income']} ريال\n"
+    )
+    if stats['top_hospital']:
+        text += f"🏥 أكثر مستشفى إصداراً: {stats['top_hospital'][0]} ({stats['top_hospital'][1]} تقرير)\n"
+    if stats['top_doctor']:
+        text += f"👨‍⚕️ أكثر طبيب إصداراً: {stats['top_doctor'][0]} ({stats['top_doctor'][1]} تقرير)\n"
+    await message.answer(text, reply_markup=admin_keyboard())
+
+# ========== الإشعارات ==========
+@dp.message_handler(lambda m: m.text == "📢 الإشعارات")
+async def notifications_menu(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("📢 إشعار لمستخدم", "📣 إشعار جماعي")
     kb.add("🔙 رجوع")
-    await message.answer(f"الطبيب: {doctor[3]}\nاختر نوع القالب لرفعه:", reply_markup=kb)
-    await ManageTemplates.upload_male.set()
+    await message.answer("الإشعارات:", reply_markup=kb)
 
-@dp.message_handler(state=ManageTemplates.upload_male)
-async def manage_templates_upload_male(message: types.Message, state: FSMContext):
-    if message.text == "🔙 رجوع":
-        await templates_management_menu(message)
-        await state.finish()
+@dp.message_handler(lambda m: m.text == "📢 إشعار لمستخدم")
+async def notify_user_start(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
         return
-    if message.text == "رفع قالب ذكر":
-        await message.answer("الرجاء رفع ملف PDF (قالب الذكور):", reply_markup=cancel_keyboard())
-    else:
-        await message.answer("❌ اختر أحد الخيارات.")
+    await message.answer("أرسل آيدي المستخدم:", reply_markup=cancel_keyboard())
+    await NotifyUser.user_id.set()
 
-@dp.message_handler(content_types=['document'], state=ManageTemplates.upload_male)
-async def handle_male_template(message: types.Message, state: FSMContext):
-    if message.document:
-        # فحص الملف
-        file_info = await bot.get_file(message.document.file_id)
-        downloaded = await bot.download_file(file_info.file_path)
+@dp.message_handler(state=NotifyUser.user_id)
+async def notify_user_get_id(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    if not message.text.isdigit():
+        await message.answer("❌ آيدي غير صحيح.")
+        return
+    await state.update_data(user_id=int(message.text))
+    await message.answer("أرسل نص الرسالة:", reply_markup=cancel_keyboard())
+    await NotifyUser.message.set()
+
+@dp.message_handler(state=NotifyUser.message)
+async def notify_user_message(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    await state.update_data(text=message.text)
+    await message.answer("هل تريد إرسال الإشعار؟", reply_markup=yes_no_keyboard())
+    await NotifyUser.confirm.set()
+
+@dp.message_handler(state=NotifyUser.confirm)
+async def notify_user_confirm(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    data = await state.get_data()
+    if message.text == "✅ نعم":
         try:
-            doc = fitz.open(stream=downloaded.getvalue(), filetype="pdf")
-            has_fields = False
-            field_types = set()
-            for page in doc:
-                widgets = page.widgets()
-                if widgets:
-                    has_fields = True
-                    for w in widgets:
-                        if w.field_type:  # 7 = text, 2 = checkbox, إلخ
-                            field_types.add(w.field_type)
-                    break
-            doc.close()
-            if not has_fields:
-                await message.answer("❌ الملف ليس PDF Form قابلاً للتعبئة. يرجى رفع ملف يحتوي على حقول.")
-                return
-        except Exception as e:
-            await message.answer(f"❌ خطأ في فحص الملف: {e}")
-            return
-
-        data = await state.get_data()
-        doctor_id = data['doctor_id']
-        doctor = database.get_doctor(doctor_id)
-        department = database.get_department(doctor[1])  # doctor[1] = department_id
-        hospital = database.get_hospital(department[1])  # department[1] = hospital_id
-        region = database.get_region(hospital[1])        # hospital[1] = region_id
-
-        region_code = region[1][:3].lower()
-        hospital_code = hospital[2][:3].lower()
-        dept_code = department[2][:3].lower()
-        folder = os.path.join(TEMPLATES_DIR, region_code, hospital_code, dept_code)
-        os.makedirs(folder, exist_ok=True)
-
-        filename = f"{region_code}_{hospital_code}_{dept_code}_male.pdf"
-        filepath = os.path.join(folder, filename)
-        with open(filepath, "wb") as f:
-            f.write(downloaded.getvalue())
-
-        await state.update_data(male_path=filepath)
-        await message.answer("✅ تم رفع قالب الذكور. الآن اختر 'رفع قالب أنثى' أو أكمل لاحقاً.")
-        kb = ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.add("رفع قالب أنثى", "إنهاء وانتقاء الحقول")
-        kb.add("🔙 رجوع")
-        await message.answer("اختر الإجراء التالي:", reply_markup=kb)
-        await ManageTemplates.upload_female.set()
+            await bot.send_message(data["user_id"], data["text"])
+        except:
+            pass
+        await message.answer("✅ تم إرسال الإشعار.", reply_markup=admin_keyboard())
     else:
-        await message.answer("❌ يرجى رفع ملف PDF.")
-
-@dp.message_handler(state=ManageTemplates.upload_female)
-async def manage_templates_upload_female(message: types.Message, state: FSMContext):
-    if message.text == "🔙 رجوع":
-        await templates_management_menu(message)
-        await state.finish()
-        return
-    if message.text == "رفع قالب أنثى":
-        await message.answer("الرجاء رفع ملف PDF (قالب الإناث):", reply_markup=cancel_keyboard())
-    elif message.text == "إنهاء وانتقاء الحقول":
-        await ask_fields_selection(message, state)
-    else:
-        await message.answer("❌ اختر أحد الخيارات.")
-
-@dp.message_handler(content_types=['document'], state=ManageTemplates.upload_female)
-async def handle_female_template(message: types.Message, state: FSMContext):
-    if message.document:
-        # فحص الملف
-        file_info = await bot.get_file(message.document.file_id)
-        downloaded = await bot.download_file(file_info.file_path)
-        try:
-            doc = fitz.open(stream=downloaded.getvalue(), filetype="pdf")
-            has_fields = False
-            for page in doc:
-                if page.widgets():
-                    has_fields = True
-                    break
-            doc.close()
-            if not has_fields:
-                await message.answer("❌ الملف ليس PDF Form قابلاً للتعبئة.")
-                return
-        except Exception as e:
-            await message.answer(f"❌ خطأ في فحص الملف: {e}")
-            return
-
-        data = await state.get_data()
-        doctor_id = data['doctor_id']
-        doctor = database.get_doctor(doctor_id)
-        department = database.get_department(doctor[1])
-        hospital = database.get_hospital(department[1])
-        region = database.get_region(hospital[1])
-
-        region_code = region[1][:3].lower()
-        hospital_code = hospital[2][:3].lower()
-        dept_code = department[2][:3].lower()
-        folder = os.path.join(TEMPLATES_DIR, region_code, hospital_code, dept_code)
-        os.makedirs(folder, exist_ok=True)
-
-        filename = f"{region_code}_{hospital_code}_{dept_code}_female.pdf"
-        filepath = os.path.join(folder, filename)
-        with open(filepath, "wb") as f:
-            f.write(downloaded.getvalue())
-
-        await state.update_data(female_path=filepath)
-        await message.answer("✅ تم رفع قالب الإناث.")
-        await ask_fields_selection(message, state)
-    else:
-        await message.answer("❌ يرجى رفع ملف PDF.")
-
-async def ask_fields_selection(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    male_path = data.get('male_path')
-    female_path = data.get('female_path')
-
-    if not male_path or not female_path:
-        await message.answer("❌ يجب رفع كلا القالبين أولاً.")
-        return
-
-    # قراءة الحقول من أحد القالبين
-    all_fields = set()
-    for path in [male_path, female_path]:
-        doc = fitz.open(path)
-        for page in doc:
-            widgets = page.widgets()
-            if widgets:
-                for w in widgets:
-                    if w.field_name:
-                        all_fields.add(w.field_name)
-        doc.close()
-
-    if not all_fields:
-        await message.answer("⚠️ لم يتم العثور على أي حقول في القوالب. تأكد من أنها PDF Form.")
-        await state.finish()
-        return
-
-    fields_list = sorted(list(all_fields))
-    await state.update_data(all_fields=fields_list)
-
-    await message.answer("أرسل قائمة بأسماء الحقول التي سيقوم البوت بتعبئتها تلقائياً، مفصولة بفواصل (مثال: full_name_ar, file_no, age):", reply_markup=back_keyboard())
-    await ManageTemplates.select_fields_to_fill.set()
-
-@dp.message_handler(state=ManageTemplates.select_fields_to_fill)
-async def select_fields_to_fill(message: types.Message, state: FSMContext):
-    if message.text == "🔙 رجوع":
-        await templates_management_menu(message)
-        await state.finish()
-        return
-    field_names = [f.strip() for f in message.text.split(',') if f.strip()]
-    data = await state.get_data()
-    all_fields = data['all_fields']
-    valid_fields = [f for f in field_names if f in all_fields]
-    if not valid_fields:
-        await message.answer("❌ لم يتم إدخال أي حقل صحيح. حاول مرة أخرى.")
-        return
-    await state.update_data(fields_to_fill=valid_fields)
-    await message.answer("الآن أرسل قائمة الحقول التي تريد أن يطلبها النظام من المستخدم، مفصولة بفواصل:")
-    await ManageTemplates.select_user_fields.set()
-
-@dp.message_handler(state=ManageTemplates.select_user_fields)
-async def select_user_fields(message: types.Message, state: FSMContext):
-    if message.text == "🔙 رجوع":
-        await templates_management_menu(message)
-        await state.finish()
-        return
-    user_fields = [f.strip() for f in message.text.split(',') if f.strip()]
-    data = await state.get_data()
-    all_fields = data['all_fields']
-    valid_user_fields = [f for f in user_fields if f in all_fields]
-    if not valid_user_fields:
-        await message.answer("❌ لم يتم إدخال أي حقل صحيح. حاول مرة أخرى.")
-        return
-
-    male_path = data['male_path']
-    female_path = data['female_path']
-    doctor_id = data['doctor_id']
-    fields_to_fill = data['fields_to_fill']
-    database.save_template_config(doctor_id, male_path, female_path, fields_to_fill, valid_user_fields)
-
-    await message.answer("✅ تم حفظ تكوين القالب بنجاح.", reply_markup=admin_keyboard())
+        await message.answer("❌ تم إلغاء الإرسال.", reply_markup=admin_keyboard())
     await state.finish()
 
-# ========== باقي معالجات لوحة المطور الأخرى (إدارة الرصيد، إلخ) ==========
-# (نفس الكود السابق مع تحسينات try/catch)
+@dp.message_handler(lambda m: m.text == "📣 إشعار جماعي")
+async def broadcast_start(message: types.Message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    await message.answer("أرسل نص الرسالة الجماعية:", reply_markup=cancel_keyboard())
+    await Broadcast.message.set()
+
+@dp.message_handler(state=Broadcast.message)
+async def broadcast_message(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    await state.update_data(text=message.text)
+    await message.answer("هل تريد إرسال الإشعار لكل المستخدمين النشطين؟", reply_markup=yes_no_keyboard())
+    await Broadcast.confirm.set()
+
+@dp.message_handler(state=Broadcast.confirm)
+async def broadcast_confirm(message: types.Message, state: FSMContext):
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    if message.text == "✅ نعم":
+        data = await state.get_data()
+        users = database.get_all_active_users()
+        count = 0
+        for user_id in users:
+            try:
+                await bot.send_message(user_id, data["text"])
+                count += 1
+            except:
+                pass
+        await message.answer(f"✅ تم الإرسال إلى {count} مستخدم.", reply_markup=admin_keyboard())
+    else:
+        await message.answer("❌ تم إلغاء العملية.", reply_markup=admin_keyboard())
+    await state.finish()
 
 # ========== العودة للقائمة الرئيسية ==========
 @dp.message_handler(lambda m: m.text == "🔙 رجوع", state="*")
