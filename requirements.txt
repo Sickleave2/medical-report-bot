@@ -1,4 +1,6 @@
 aiogram==2.25.1
+redis
+python-dotenv
 PyMuPDF
 hijri-converter
 Unidecode
