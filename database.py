@@ -10,29 +10,7 @@ def init_db():
     conn = connect()
     cursor = conn.cursor()
 
-    # --- الجداول الحالية ---
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        telegram_id INTEGER UNIQUE,
-        username TEXT,
-        balance REAL DEFAULT 0,
-        is_admin INTEGER DEFAULT 0,
-        is_banned INTEGER DEFAULT 0,
-        created_at TEXT
-    )
-    """)
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS transactions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        telegram_id INTEGER,
-        amount REAL,
-        type TEXT,
-        created_at TEXT
-    )
-    """)
-
+    # --- الجداول الحالية (بدون تغيير) ---
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS regions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,16 +36,37 @@ def init_db():
     )
     """)
 
-    # --- جدول الأطباء (يخزن مسارات القوالب المحلية) ---
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS doctors (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         department_id INTEGER,
         name TEXT,
         title TEXT,
-        template_male TEXT,   -- المسار المحلي لقالب الذكر
-        template_female TEXT, -- المسار المحلي لقالب الأنثى
+        pdf_male TEXT,      -- file_id لقالب PDF للذكور (قد نستبدله بمسار محلي لاحقاً)
+        pdf_female TEXT,    -- file_id لقالب PDF للإناث
         FOREIGN KEY(department_id) REFERENCES departments(id)
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        telegram_id INTEGER UNIQUE,
+        username TEXT,
+        balance REAL DEFAULT 0,
+        is_admin INTEGER DEFAULT 0,
+        is_banned INTEGER DEFAULT 0,
+        created_at TEXT
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        telegram_id INTEGER,
+        amount REAL,
+        type TEXT,
+        created_at TEXT
     )
     """)
 
@@ -109,7 +108,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- إضافة المناطق السعودية تلقائياً ---
+# --- إضافة المناطق السعودية تلقائياً (كما هي) ---
 def seed_regions():
     conn = connect()
     cursor = conn.cursor()
@@ -123,15 +122,178 @@ def seed_regions():
     conn.commit()
     conn.close()
 
-# ========== دوال المستخدمين ==========
+# ========== دوال المناطق (كما هي) ==========
+def get_regions():
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM regions ORDER BY name")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def add_region(name):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO regions (name) VALUES (?)", (name,))
+    conn.commit()
+    conn.close()
+
+def delete_region(region_id):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM regions WHERE id=?", (region_id,))
+    conn.commit()
+    conn.close()
+
+# ========== دوال المستشفيات (كما هي) ==========
+def get_hospitals(region_id=None):
+    conn = connect()
+    cursor = conn.cursor()
+    if region_id:
+        cursor.execute("SELECT * FROM hospitals WHERE region_id=? ORDER BY name", (region_id,))
+    else:
+        cursor.execute("SELECT * FROM hospitals ORDER BY name")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def add_hospital(region_id, name):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO hospitals (region_id, name) VALUES (?,?)", (region_id, name))
+    conn.commit()
+    conn.close()
+
+def delete_hospital(hospital_id):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM hospitals WHERE id=?", (hospital_id,))
+    conn.commit()
+    conn.close()
+
+# ========== دوال الأقسام (كما هي) ==========
+def get_departments(hospital_id=None):
+    conn = connect()
+    cursor = conn.cursor()
+    if hospital_id:
+        cursor.execute("SELECT * FROM departments WHERE hospital_id=? ORDER BY name", (hospital_id,))
+    else:
+        cursor.execute("SELECT * FROM departments ORDER BY name")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def add_department(hospital_id, name):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO departments (hospital_id, name) VALUES (?,?)", (hospital_id, name))
+    conn.commit()
+    conn.close()
+
+def delete_department(department_id):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM departments WHERE id=?", (department_id,))
+    conn.commit()
+    conn.close()
+
+# ========== دوال الأطباء (تمت إضافة دوال جديدة مع الحفاظ على القديمة) ==========
+def get_doctors(department_id=None):
+    conn = connect()
+    cursor = conn.cursor()
+    if department_id:
+        cursor.execute("SELECT * FROM doctors WHERE department_id=? ORDER BY name", (department_id,))
+    else:
+        cursor.execute("SELECT * FROM doctors ORDER BY name")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def get_doctor(doctor_id):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM doctors WHERE id=?", (doctor_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+def add_doctor(department_id, name, title, pdf_male, pdf_female):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO doctors (department_id, name, title, pdf_male, pdf_female)
+        VALUES (?,?,?,?,?)
+    """, (department_id, name, title, pdf_male, pdf_female))
+    doctor_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return doctor_id
+
+def delete_doctor(doctor_id):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM doctors WHERE id=?", (doctor_id,))
+    conn.commit()
+    conn.close()
+
+# --- دوال جديدة للمسارات المحلية (يمكن إضافتها لاحقاً) ---
+def update_doctor_template_paths(doctor_id, male_path, female_path):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE doctors SET pdf_male=?, pdf_female=? WHERE id=?", (male_path, female_path, doctor_id))
+    conn.commit()
+    conn.close()
+
+# ========== دوال حقول القوالب (جديدة) ==========
+def set_template_fields(doctor_id, fields):
+    """
+    fields: list of field names that should be used.
+    """
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM template_fields WHERE doctor_id=?", (doctor_id,))
+    for f in fields:
+        cursor.execute("INSERT INTO template_fields (doctor_id, field_name, is_used) VALUES (?,?,1)", (doctor_id, f))
+    conn.commit()
+    conn.close()
+
+def get_template_fields(doctor_id):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT field_name FROM template_fields WHERE doctor_id=?", (doctor_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+# ========== دوال البيانات المطلوبة من المستخدم (جديدة) ==========
+def set_required_data(doctor_id, data_keys):
+    """
+    data_keys: list of keys like ['full_name', 'birth_date', 'employer', ...]
+    """
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM required_data WHERE doctor_id=?", (doctor_id,))
+    for key in data_keys:
+        cursor.execute("INSERT INTO required_data (doctor_id, data_key, is_required) VALUES (?,?,1)", (doctor_id, key))
+    conn.commit()
+    conn.close()
+
+def get_required_data(doctor_id):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT data_key FROM required_data WHERE doctor_id=?", (doctor_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+# ========== دوال المستخدمين (كما هي) ==========
 def add_user(telegram_id, username, is_admin=0):
     conn = connect()
     cursor = conn.cursor()
-    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute("""
-        INSERT OR IGNORE INTO users (telegram_id, username, is_admin, created_at)
-        VALUES (?, ?, ?, ?)
-    """, (telegram_id, username, is_admin, created_at))
+    INSERT OR IGNORE INTO users (telegram_id, username, is_admin, created_at)
+    VALUES (?, ?, ?, ?)
+    """, (telegram_id, username, is_admin, datetime.now()))
     conn.commit()
     conn.close()
 
@@ -144,15 +306,21 @@ def get_user(telegram_id):
     return user
 
 def get_balance(telegram_id):
-    user = get_user(telegram_id)
-    return user[3] if user else 0.0
-
-def update_balance(telegram_id, amount, txn_type):
     conn = connect()
     cursor = conn.cursor()
-    cursor.execute("UPDATE users SET balance = balance + ? WHERE telegram_id = ?", (amount, telegram_id))
-    cursor.execute("INSERT INTO transactions (telegram_id, amount, type, created_at) VALUES (?, ?, ?, ?)",
-                   (telegram_id, amount, txn_type, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    cursor.execute("SELECT balance FROM users WHERE telegram_id=?", (telegram_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return float(result[0]) if result else 0.0
+
+def update_balance(telegram_id, amount, tx_type):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET balance = balance + ? WHERE telegram_id=?", (amount, telegram_id))
+    cursor.execute("""
+        INSERT INTO transactions (telegram_id, amount, type, created_at)
+        VALUES (?, ?, ?, ?)
+    """, (telegram_id, amount, tx_type, datetime.now()))
     conn.commit()
     conn.close()
 
@@ -197,195 +365,14 @@ def get_last_transaction(telegram_id):
     conn.close()
     return tx
 
-# ========== دوال المناطق والمستشفيات والأقسام ==========
-def get_regions():
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM regions ORDER BY name")
-    return cursor.fetchall()
-
-def add_region(name):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO regions (name) VALUES (?)", (name,))
-    conn.commit()
-    conn.close()
-
-def delete_region(region_id):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM regions WHERE id=?", (region_id,))
-    conn.commit()
-    conn.close()
-
-def get_hospitals(region_id=None):
-    conn = connect()
-    cursor = conn.cursor()
-    if region_id:
-        cursor.execute("SELECT * FROM hospitals WHERE region_id=? ORDER BY name", (region_id,))
-    else:
-        cursor.execute("SELECT * FROM hospitals ORDER BY name")
-    return cursor.fetchall()
-
-def add_hospital(region_id, name):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO hospitals (region_id, name) VALUES (?,?)", (region_id, name))
-    conn.commit()
-    conn.close()
-
-def delete_hospital(hospital_id):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM hospitals WHERE id=?", (hospital_id,))
-    conn.commit()
-    conn.close()
-
-def get_departments(hospital_id=None):
-    conn = connect()
-    cursor = conn.cursor()
-    if hospital_id:
-        cursor.execute("SELECT * FROM departments WHERE hospital_id=? ORDER BY name", (hospital_id,))
-    else:
-        cursor.execute("SELECT * FROM departments ORDER BY name")
-    return cursor.fetchall()
-
-def add_department(hospital_id, name):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO departments (hospital_id, name) VALUES (?,?)", (hospital_id, name))
-    conn.commit()
-    conn.close()
-
-def delete_department(department_id):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM departments WHERE id=?", (department_id,))
-    conn.commit()
-    conn.close()
-
-# ========== دوال الأطباء (محدثة) ==========
-def get_doctors(department_id=None):
-    conn = connect()
-    cursor = conn.cursor()
-    if department_id:
-        cursor.execute("SELECT * FROM doctors WHERE department_id=? ORDER BY name", (department_id,))
-    else:
-        cursor.execute("SELECT * FROM doctors ORDER BY name")
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
-
-def get_doctor(doctor_id):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM doctors WHERE id=?", (doctor_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row
-
-def add_doctor(department_id, name, title, template_male, template_female):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO doctors (department_id, name, title, template_male, template_female)
-        VALUES (?,?,?,?,?)
-    """, (department_id, name, title, template_male, template_female))
-    doctor_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-    return doctor_id
-
-def delete_doctor(doctor_id):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM doctors WHERE id=?", (doctor_id,))
-    conn.commit()
-    conn.close()
-
-def update_doctor_templates(doctor_id, template_male, template_female):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE doctors SET template_male=?, template_female=? WHERE id=?", (template_male, template_female, doctor_id))
-    conn.commit()
-    conn.close()
-
-# ========== دوال المناطق والمستشفيات والأقسام بالـ ID ==========
-def get_region(region_id):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM regions WHERE id=?", (region_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row
-
-def get_hospital(hosp_id):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM hospitals WHERE id=?", (hosp_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row
-
-def get_department(dept_id):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM departments WHERE id=?", (dept_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row
-
-# ========== دوال حقول القوالب ==========
-def set_template_fields(doctor_id, fields):
-    """
-    fields: list of field names that should be used.
-    """
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM template_fields WHERE doctor_id=?", (doctor_id,))
-    for f in fields:
-        cursor.execute("INSERT INTO template_fields (doctor_id, field_name, is_used) VALUES (?,?,1)", (doctor_id, f))
-    conn.commit()
-    conn.close()
-
-def get_template_fields(doctor_id):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT field_name FROM template_fields WHERE doctor_id=?", (doctor_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
-
-# ========== دوال البيانات المطلوبة من المستخدم ==========
-def set_required_data(doctor_id, data_keys):
-    """
-    data_keys: list of keys like ['full_name', 'birth_date', 'employer', ...]
-    """
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM required_data WHERE doctor_id=?", (doctor_id,))
-    for key in data_keys:
-        cursor.execute("INSERT INTO required_data (doctor_id, data_key, is_required) VALUES (?,?,1)", (doctor_id, key))
-    conn.commit()
-    conn.close()
-
-def get_required_data(doctor_id):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT data_key FROM required_data WHERE doctor_id=?", (doctor_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
-
-# ========== دوال التقارير والإحصائيات ==========
+# ========== دوال التقارير (كما هي) ==========
 def save_report(telegram_id, doctor_id, patient_name, patient_gender):
     conn = connect()
     cursor = conn.cursor()
-    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute("""
         INSERT INTO reports (telegram_id, doctor_id, patient_name, patient_gender, created_at)
-        VALUES (?, ?, ?, ?, ?)
-    """, (telegram_id, doctor_id, patient_name, patient_gender, created_at))
+        VALUES (?,?,?,?, datetime('now'))
+    """, (telegram_id, doctor_id, patient_name, patient_gender))
     conn.commit()
     conn.close()
 
@@ -396,6 +383,7 @@ def get_report_stats():
     total_reports = cursor.fetchone()[0]
     cursor.execute("SELECT SUM(amount) FROM transactions WHERE type='report'")
     total_income = cursor.fetchone()[0] or 0
+    # أكثر مستشفى إصداراً
     cursor.execute("""
         SELECT h.name, COUNT(*) as cnt
         FROM reports r
@@ -407,6 +395,7 @@ def get_report_stats():
         LIMIT 1
     """)
     top_hospital = cursor.fetchone()
+    # أكثر طبيب إصداراً
     cursor.execute("""
         SELECT d.name, COUNT(*) as cnt
         FROM reports r
