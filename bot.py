@@ -242,7 +242,7 @@ async def start(message: types.Message):
 
 @dp.message_handler(lambda m: m.text == "ℹ️ الدعم")
 async def support(message: types.Message):
-    await message.answer("للتواصل مع الدعم: @SupportHandle", reply_markup=get_correct_keyboard(message.from_user.id))
+    await message.answer("للتواصل مع الدعم: @ABN_ALAQLANY", reply_markup=get_correct_keyboard(message.from_user.id))
 
 @dp.message_handler(lambda m: m.text == "💰 رصيدي")
 async def balance_handler(message: types.Message):
