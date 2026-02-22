@@ -1,5 +1,6 @@
 aiogram==2.25.1
-PyMuPDF
-hijri-converter
-python-dateutil
-unidecode
+PyMuPDF==1.23.8
+python-dateutil==2.8.2
+hijri-converter==2.2.1
+deep-translator==1.9.1
+asyncio==3.4.3
