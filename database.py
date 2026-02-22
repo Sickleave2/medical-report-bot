@@ -1,16 +1,16 @@
+# database.py (مُعدَّل ومُستقر)
 import sqlite3
 from datetime import datetime
 
 DB_NAME = "database.db"
 
 def connect():
-    return sqlite3.connect(DB_NAME)
+    return sqlite3.connect(DB_NAME, timeout=10)
 
 def init_db():
     conn = connect()
     cursor = conn.cursor()
 
-    # --- الجداول الحالية (بدون تغيير) ---
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS regions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,8 +42,8 @@ def init_db():
         department_id INTEGER,
         name TEXT,
         title TEXT,
-        pdf_male TEXT,      -- file_id لقالب PDF للذكور (قد نستبدله بمسار محلي لاحقاً)
-        pdf_female TEXT,    -- file_id لقالب PDF للإناث
+        pdf_male TEXT,
+        pdf_female TEXT,
         FOREIGN KEY(department_id) REFERENCES departments(id)
     )
     """)
@@ -82,13 +82,13 @@ def init_db():
     )
     """)
 
-    # --- جداول جديدة لإدارة القوالب والإعدادات ---
+    # جداول جديدة للميزات المستقبلية (لكن لن تستخدم حتى تستقر)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS template_fields (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         doctor_id INTEGER,
-        field_name TEXT,           -- اسم الحقل في PDF
-        is_used INTEGER DEFAULT 1, -- هل سيتم تعبئته؟
+        field_name TEXT,
+        is_used INTEGER DEFAULT 1,
         FOREIGN KEY(doctor_id) REFERENCES doctors(id),
         UNIQUE(doctor_id, field_name)
     )
@@ -98,7 +98,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS required_data (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         doctor_id INTEGER,
-        data_key TEXT,             -- مثل 'full_name', 'birth_date', 'employer', ...
+        data_key TEXT,
         is_required INTEGER DEFAULT 1,
         FOREIGN KEY(doctor_id) REFERENCES doctors(id),
         UNIQUE(doctor_id, data_key)
@@ -108,7 +108,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- إضافة المناطق السعودية تلقائياً (كما هي) ---
 def seed_regions():
     conn = connect()
     cursor = conn.cursor()
@@ -122,7 +121,7 @@ def seed_regions():
     conn.commit()
     conn.close()
 
-# ========== دوال المناطق (كما هي) ==========
+# ========== المناطق ==========
 def get_regions():
     conn = connect()
     cursor = conn.cursor()
@@ -145,7 +144,15 @@ def delete_region(region_id):
     conn.commit()
     conn.close()
 
-# ========== دوال المستشفيات (كما هي) ==========
+def get_region(region_id):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM regions WHERE id=?", (region_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+# ========== المستشفيات ==========
 def get_hospitals(region_id=None):
     conn = connect()
     cursor = conn.cursor()
@@ -171,7 +178,15 @@ def delete_hospital(hospital_id):
     conn.commit()
     conn.close()
 
-# ========== دوال الأقسام (كما هي) ==========
+def get_hospital(hosp_id):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM hospitals WHERE id=?", (hosp_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+# ========== الأقسام ==========
 def get_departments(hospital_id=None):
     conn = connect()
     cursor = conn.cursor()
@@ -197,7 +212,15 @@ def delete_department(department_id):
     conn.commit()
     conn.close()
 
-# ========== دوال الأطباء (تمت إضافة دوال جديدة مع الحفاظ على القديمة) ==========
+def get_department(dept_id):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM departments WHERE id=?", (dept_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+# ========== الأطباء ==========
 def get_doctors(department_id=None):
     conn = connect()
     cursor = conn.cursor()
@@ -236,57 +259,7 @@ def delete_doctor(doctor_id):
     conn.commit()
     conn.close()
 
-# --- دوال جديدة للمسارات المحلية (يمكن إضافتها لاحقاً) ---
-def update_doctor_template_paths(doctor_id, male_path, female_path):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE doctors SET pdf_male=?, pdf_female=? WHERE id=?", (male_path, female_path, doctor_id))
-    conn.commit()
-    conn.close()
-
-# ========== دوال حقول القوالب (جديدة) ==========
-def set_template_fields(doctor_id, fields):
-    """
-    fields: list of field names that should be used.
-    """
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM template_fields WHERE doctor_id=?", (doctor_id,))
-    for f in fields:
-        cursor.execute("INSERT INTO template_fields (doctor_id, field_name, is_used) VALUES (?,?,1)", (doctor_id, f))
-    conn.commit()
-    conn.close()
-
-def get_template_fields(doctor_id):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT field_name FROM template_fields WHERE doctor_id=?", (doctor_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
-
-# ========== دوال البيانات المطلوبة من المستخدم (جديدة) ==========
-def set_required_data(doctor_id, data_keys):
-    """
-    data_keys: list of keys like ['full_name', 'birth_date', 'employer', ...]
-    """
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM required_data WHERE doctor_id=?", (doctor_id,))
-    for key in data_keys:
-        cursor.execute("INSERT INTO required_data (doctor_id, data_key, is_required) VALUES (?,?,1)", (doctor_id, key))
-    conn.commit()
-    conn.close()
-
-def get_required_data(doctor_id):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT data_key FROM required_data WHERE doctor_id=?", (doctor_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
-
-# ========== دوال المستخدمين (كما هي) ==========
+# ========== المستخدمين ==========
 def add_user(telegram_id, username, is_admin=0):
     conn = connect()
     cursor = conn.cursor()
@@ -306,17 +279,13 @@ def get_user(telegram_id):
     return user
 
 def get_balance(telegram_id):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT balance FROM users WHERE telegram_id=?", (telegram_id,))
-    result = cursor.fetchone()
-    conn.close()
-    return float(result[0]) if result else 0.0
+    user = get_user(telegram_id)
+    return float(user[3]) if user else 0.0
 
 def update_balance(telegram_id, amount, tx_type):
     conn = connect()
     cursor = conn.cursor()
-    cursor.execute("UPDATE users SET balance = balance + ? WHERE telegram_id=?", (amount, telegram_id))
+    cursor.execute("UPDATE users SET balance = balance + ? WHERE telegram_id = ?", (amount, telegram_id))
     cursor.execute("""
         INSERT INTO transactions (telegram_id, amount, type, created_at)
         VALUES (?, ?, ?, ?)
@@ -365,7 +334,7 @@ def get_last_transaction(telegram_id):
     conn.close()
     return tx
 
-# ========== دوال التقارير (كما هي) ==========
+# ========== التقارير ==========
 def save_report(telegram_id, doctor_id, patient_name, patient_gender):
     conn = connect()
     cursor = conn.cursor()
@@ -383,7 +352,6 @@ def get_report_stats():
     total_reports = cursor.fetchone()[0]
     cursor.execute("SELECT SUM(amount) FROM transactions WHERE type='report'")
     total_income = cursor.fetchone()[0] or 0
-    # أكثر مستشفى إصداراً
     cursor.execute("""
         SELECT h.name, COUNT(*) as cnt
         FROM reports r
@@ -395,7 +363,6 @@ def get_report_stats():
         LIMIT 1
     """)
     top_hospital = cursor.fetchone()
-    # أكثر طبيب إصداراً
     cursor.execute("""
         SELECT d.name, COUNT(*) as cnt
         FROM reports r
@@ -412,3 +379,38 @@ def get_report_stats():
         "top_hospital": top_hospital,
         "top_doctor": top_doctor
     }
+
+# ========== دوال القوالب الجديدة (لن تستخدم حتى استقرار البوت) ==========
+def set_template_fields(doctor_id, fields):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM template_fields WHERE doctor_id=?", (doctor_id,))
+    for f in fields:
+        cursor.execute("INSERT INTO template_fields (doctor_id, field_name, is_used) VALUES (?,?,1)", (doctor_id, f))
+    conn.commit()
+    conn.close()
+
+def get_template_fields(doctor_id):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT field_name FROM template_fields WHERE doctor_id=?", (doctor_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+def set_required_data(doctor_id, data_keys):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM required_data WHERE doctor_id=?", (doctor_id,))
+    for key in data_keys:
+        cursor.execute("INSERT INTO required_data (doctor_id, data_key, is_required) VALUES (?,?,1)", (doctor_id, key))
+    conn.commit()
+    conn.close()
+
+def get_required_data(doctor_id):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT data_key FROM required_data WHERE doctor_id=?", (doctor_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
