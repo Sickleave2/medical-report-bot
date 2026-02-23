@@ -1,6 +1,4 @@
 aiogram==2.25.1
-redis>=4.3.0
-hiredis
-hijridate
 PyMuPDF
 unidecode
+hijri-converter
