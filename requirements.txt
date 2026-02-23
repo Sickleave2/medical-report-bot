@@ -1,5 +1,5 @@
 aiogram==2.25.1
-redis==5.0.1
+redis==5.0.4
 python-dotenv
 PyMuPDF
 hijri-converter
