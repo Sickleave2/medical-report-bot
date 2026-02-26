@@ -1,4 +1,4 @@
-# database.py (محدث بالكامل)
+# database.py (مع إضافة دوال pdf_configs)
 import sqlite3
 from datetime import datetime
 
@@ -19,7 +19,7 @@ def init_db():
     )
     """)
 
-    # جدول المستشفيات (تم إضافة حقل السعر price)
+    # جدول المستشفيات
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS hospitals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
