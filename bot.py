@@ -1,4 +1,4 @@
-# bot.py (النسخة النهائية الكاملة)
+# bot.py (النسخة النهائية مع تحسينات التنقل وتعبئة PDF)
 import logging
 import os
 import io
@@ -17,7 +17,6 @@ import database
 from navigation import Navigation
 from pdf_processor import SmartPDFProcessor
 
-# إعداد logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -38,14 +37,8 @@ dp = Dispatcher(bot, storage=storage)
 TEMPLATES_DIR = "templates"
 os.makedirs(TEMPLATES_DIR, exist_ok=True)
 
-# تهيئة قاعدة البيانات
-try:
-    database.init_db()
-    database.seed_regions()
-    logger.info("Database initialized successfully")
-except Exception as e:
-    logger.critical(f"Failed to initialize database: {e}")
-    exit(1)
+database.init_db()
+database.seed_regions()
 
 # ========== دوال مساعدة ==========
 def slugify(text):
@@ -122,6 +115,11 @@ def cancel_keyboard():
     kb.add("❌ إلغاء العملية", "🏠 الرئيسية")
     return kb
 
+def yes_no_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("✅ نعم", "❌ لا")
+    return kb
+
 def get_correct_keyboard(user_id):
     is_admin = str(user_id) == ADMIN_ID
     return admin_keyboard() if is_admin else main_keyboard(False)
@@ -173,6 +171,16 @@ async def go_to_main(message: types.Message, state: FSMContext):
     is_admin = str(message.from_user.id) == ADMIN_ID
     await message.answer("تم العودة للقائمة الرئيسية.", reply_markup=main_keyboard(is_admin))
 
+# ========== دوال إنشاء لوحات الأزرار التفاعلية لاختيار الحقول ==========
+def get_fields_keyboard(all_fields, selected_fields, gender):
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    for field in all_fields:
+        status = "✅" if field in selected_fields else "❌"
+        cb_data = f"toggle_{gender}_{field}"
+        keyboard.insert(InlineKeyboardButton(f"{status} {field}", callback_data=cb_data))
+    keyboard.add(InlineKeyboardButton("💾 حفظ هذه الحقول", callback_data=f"save_{gender}"))
+    return keyboard
+
 # ========== حالات FSM ==========
 class CreateReport(StatesGroup):
     choose_region = State()
@@ -215,8 +223,9 @@ class AddDoctor(StatesGroup):
     name = State()
     title = State()
     pdf_male = State()
-    pdf_female_config = State()  # لاختيار الحقول بعد رفع الملف
     pdf_female = State()
+    wait_male_config = State()
+    wait_female_config = State()
 
 class DeleteDoctor(StatesGroup):
     choose = State()
@@ -306,7 +315,7 @@ async def balance_handler(message: types.Message):
         logger.error(f"balance_handler error: {e}")
         await message.answer("❌ حدث خطأ.")
 
-# ========== إصدار تقرير (الديناميكي) ==========
+# ========== إصدار تقرير ==========
 @dp.message_handler(lambda m: m.text == "🤍 إصدار إجازتك الآن")
 async def start_report(message: types.Message):
     try:
@@ -316,7 +325,6 @@ async def start_report(message: types.Message):
             await message.answer("🚫 حسابك محظور.")
             return
 
-        # لا نتحقق من الرصيد هنا، سنتحقق بعد تحديد المستشفى
         regions = database.get_regions()
         if not regions:
             await message.answer("لا توجد مناطق مسجلة حالياً، يرجى التواصل مع المطور.")
@@ -387,7 +395,7 @@ async def choose_hospital(message: types.Message, state: FSMContext):
         await message.answer("❌ اختيار غير صحيح.")
         return
 
-    # التحقق من الرصيد كافٍ لسعر هذا المستشفى
+    # التحقق من الرصيد
     price = database.get_hospital_price(hospital_id)
     user_id = message.from_user.id
     balance = database.get_balance(user_id)
@@ -488,7 +496,6 @@ async def choose_gender(message: types.Message, state: FSMContext):
     gender = gender_map[message.text]
     await state.update_data(gender=gender)
 
-    # الآن نطلب البيانات المطلوبة (نظام ذكي: المستخدم يرسل كل شيء مرة واحدة)
     await message.answer(
         "أرسل بياناتك بالتنسيق التالي:\n"
         "الاسم الكامل\n"
@@ -504,7 +511,7 @@ async def choose_gender(message: types.Message, state: FSMContext):
         "7",
         reply_markup=cancel_keyboard()
     )
-    await CreateReport.patient_name.set()  # سنقوم بجمع البيانات في خطوة واحدة
+    await CreateReport.patient_name.set()
 
 @dp.message_handler(state=CreateReport.patient_name)
 async def collect_data(message: types.Message, state: FSMContext):
@@ -542,7 +549,6 @@ async def collect_data(message: types.Message, state: FSMContext):
         days=days
     )
 
-    # عرض ملخص وسعر التقرير
     data = await state.get_data()
     price = data["price"]
     summary = (
@@ -558,8 +564,7 @@ async def collect_data(message: types.Message, state: FSMContext):
         f"💰 التكلفة: {price} ريال\n\n"
         f"هل البيانات صحيحة؟"
     )
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("✅ نعم", "❌ لا")
+    kb = yes_no_keyboard()
     kb = nav_keyboard(kb)
     await message.answer(summary, reply_markup=kb)
     await CreateReport.confirm.set()
@@ -587,7 +592,7 @@ async def confirm_report(message: types.Message, state: FSMContext):
     # حفظ التقرير
     database.save_report(user_id, data["doctor_id"], data["patient_name"], data["gender"])
 
-    # اختيار القالب المناسب وجلب الحقول المحددة من pdf_configs
+    # اختيار القالب المناسب وجلب الحقول المحددة
     gender = data["gender"]
     pdf_path = data["pdf_male"] if gender == "ذكر" else data["pdf_female"]
     selected_fields = database.get_pdf_config(data["doctor_id"], gender)
@@ -649,7 +654,7 @@ async def balance_management(message: types.Message):
         return
     await message.answer("إدارة الرصيد:", reply_markup=balance_management_keyboard())
 
-# إضافة رصيد (مختصر)
+# إضافة رصيد
 @dp.message_handler(lambda m: m.text == "➕ إضافة رصيد")
 async def add_balance_start(message: types.Message):
     if str(message.from_user.id) != ADMIN_ID:
@@ -714,7 +719,7 @@ async def add_balance_confirm(message: types.Message, state: FSMContext):
     await message.answer("✅ تم تنفيذ العملية.", reply_markup=balance_management_keyboard())
     await state.finish()
 
-# خصم رصيد (مختصر)
+# خصم رصيد
 @dp.message_handler(lambda m: m.text == "➖ خصم رصيد")
 async def deduct_balance_start(message: types.Message):
     if str(message.from_user.id) != ADMIN_ID:
@@ -1301,7 +1306,7 @@ async def price_new_price(message: types.Message, state: FSMContext):
     await message.answer(f"✅ تم تحديث سعر مستشفى {data['hospital_name']} إلى {new_price} ريال.", reply_markup=admin_keyboard())
     await state.finish()
 
-# ========== إدارة الأطباء (مع رفع القوالب وتحديد الحقول) ==========
+# ========== إدارة الأطباء مع رفع القوالب واختيار الحقول ==========
 @dp.message_handler(lambda m: m.text == "👨‍⚕️ إدارة الأطباء")
 async def manage_doctors_menu(message: types.Message):
     if str(message.from_user.id) != ADMIN_ID:
@@ -1469,9 +1474,9 @@ async def add_doctor_pdf_male(message: types.Message, state: FSMContext):
     file_id = message.document.file_id
     await state.update_data(pdf_male_id=file_id)
     await message.answer("تم استلام ملف الذكور. الآن رفع ملف PDF الخاص بالمرضى الإناث:", reply_markup=cancel_keyboard())
-    await AddDoctor.pdf_female_config.set()  # سنقوم بتحليل الملف الأول بعد رفع الثاني
+    await AddDoctor.pdf_female.set()
 
-@dp.message_handler(content_types=['document'], state=AddDoctor.pdf_female_config)
+@dp.message_handler(content_types=['document'], state=AddDoctor.pdf_female)
 async def add_doctor_pdf_female(message: types.Message, state: FSMContext):
     if message.text == "🏠 الرئيسية":
         await go_to_main(message, state)
@@ -1506,8 +1511,7 @@ async def add_doctor_pdf_female(message: types.Message, state: FSMContext):
         female_fields = SmartPDFProcessor.analyze_pdf(female_path)
 
         # دمج الحقول (نفترض أن الملفين لهما نفس الحقول)
-        all_fields = set([f["name"] for f in male_fields] + [f["name"] for f in female_fields])
-        field_list = list(all_fields)
+        all_fields = list(set(male_fields + female_fields))
 
         # إضافة الطبيب مؤقتاً بدون حفظ config
         doctor_id = database.add_doctor(
@@ -1517,61 +1521,68 @@ async def add_doctor_pdf_female(message: types.Message, state: FSMContext):
             male_path,
             female_path
         )
+        await state.update_data(doctor_id=doctor_id, male_fields=all_fields, female_fields=all_fields,
+                                male_selected=[], female_selected=[])
 
-        # عرض الحقول للمطور لاختيارها
-        await state.update_data(doctor_id=doctor_id, field_list=field_list, selected_fields=[])
-
-        # بناء لوحة اختيار الحقول
-        text = "اختر الحقول التي تريد تعبئتها في التقرير (سيتم تطبيقها على كلا الملفين):\n\n"
-        await send_field_selection(message, state, text)
+        # عرض الحقول لاختيارها لملف الذكور
+        await message.answer("🎯 اختر الحقول التي تود تعبئتها في ملف الذكور:",
+                             reply_markup=get_fields_keyboard(all_fields, [], "male"))
+        await AddDoctor.wait_male_config.set()
 
     except Exception as e:
         logger.error(f"add_doctor_pdf_female error: {e}")
         await message.answer("❌ حدث خطأ أثناء معالجة الملفات.")
         await state.finish()
 
-async def send_field_selection(message: types.Message, state: FSMContext, text):
-    data = await state.get_data()
-    field_list = data["field_list"]
-    selected = data.get("selected_fields", [])
-
-    inline_kb = InlineKeyboardMarkup(row_width=2)
-    for field in field_list:
-        mark = "✅" if field in selected else "❌"
-        inline_kb.insert(InlineKeyboardButton(f"{mark} {field}", callback_data=f"toggle_{field}"))
-    inline_kb.add(InlineKeyboardButton("✅ تأكيد الحقول", callback_data="confirm_fields"))
-
-    await message.answer(text, reply_markup=inline_kb)
-
-@dp.callback_query_handler(lambda c: c.data.startswith("toggle_"), state=AddDoctor.pdf_female_config)
+@dp.callback_query_handler(lambda c: c.data.startswith('toggle_'), state=[AddDoctor.wait_male_config, AddDoctor.wait_female_config])
 async def toggle_field(callback_query: types.CallbackQuery, state: FSMContext):
-    field = callback_query.data.replace("toggle_", "")
+    parts = callback_query.data.split('_', 2)
+    if len(parts) < 3:
+        await callback_query.answer("خطأ في البيانات")
+        return
+    _, gender, field_name = parts
     data = await state.get_data()
-    selected = data.get("selected_fields", [])
-    if field in selected:
-        selected.remove(field)
-    else:
-        selected.append(field)
-    await state.update_data(selected_fields=selected)
-
-    # تحديث الرسالة
-    text = "اختر الحقول التي تريد تعبئتها في التقرير (سيتم تطبيقها على كلا الملفين):\n\n"
-    await send_field_selection(callback_query.message, state, text)
+    if gender == "male":
+        selected = data.get("male_selected", [])
+        if field_name in selected:
+            selected.remove(field_name)
+        else:
+            selected.append(field_name)
+        await state.update_data(male_selected=selected)
+        await callback_query.message.edit_reply_markup(
+            reply_markup=get_fields_keyboard(data["male_fields"], selected, "male")
+        )
+    else:  # female
+        selected = data.get("female_selected", [])
+        if field_name in selected:
+            selected.remove(field_name)
+        else:
+            selected.append(field_name)
+        await state.update_data(female_selected=selected)
+        await callback_query.message.edit_reply_markup(
+            reply_markup=get_fields_keyboard(data["female_fields"], selected, "female")
+        )
     await callback_query.answer()
 
-@dp.callback_query_handler(lambda c: c.data == "confirm_fields", state=AddDoctor.pdf_female_config)
-async def confirm_fields(callback_query: types.CallbackQuery, state: FSMContext):
+@dp.callback_query_handler(lambda c: c.data.startswith('save_'), state=[AddDoctor.wait_male_config, AddDoctor.wait_female_config])
+async def save_fields(callback_query: types.CallbackQuery, state: FSMContext):
+    _, gender = callback_query.data.split('_')
     data = await state.get_data()
     doctor_id = data["doctor_id"]
-    selected_fields = data.get("selected_fields", [])
-
-    # حفظ نفس الحقول لكلا الجنسين (للبساطة)
-    database.save_pdf_config(doctor_id, "male", selected_fields)
-    database.save_pdf_config(doctor_id, "female", selected_fields)
-
-    await callback_query.message.answer(f"✅ تم إضافة الطبيب '{data['name']}' بنجاح مع {len(selected_fields)} حقل محدد.", reply_markup=admin_keyboard())
-    await callback_query.answer()
-    await state.finish()
+    if gender == "male":
+        selected = data.get("male_selected", [])
+        database.save_pdf_config(doctor_id, "male", selected)
+        await callback_query.message.edit_text("✅ تم حفظ إعدادات ملف الذكور. الآن اختر الحقول لملف الإناث:")
+        await callback_query.message.edit_reply_markup(
+            reply_markup=get_fields_keyboard(data["female_fields"], data.get("female_selected", []), "female")
+        )
+        await AddDoctor.wait_female_config.set()
+    else:  # female
+        selected = data.get("female_selected", [])
+        database.save_pdf_config(doctor_id, "female", selected)
+        await callback_query.message.edit_text(f"✅ تم إضافة الطبيب '{data['name']}' بنجاح مع الحقول المحددة.")
+        await callback_query.answer()
+        await state.finish()
 
 @dp.message_handler(lambda m: m.text == "🗑 حذف طبيب")
 async def delete_doctor_start(message: types.Message):
@@ -1747,11 +1758,6 @@ async def back_main(message: types.Message, state: FSMContext):
         await message.answer("❌ تم إلغاء العملية للرجوع.")
     is_admin = str(message.from_user.id) == ADMIN_ID
     await message.answer("القائمة الرئيسية", reply_markup=main_keyboard(is_admin))
-
-def yes_no_keyboard():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("✅ نعم", "❌ لا")
-    return kb
 
 if __name__ == "__main__":
     logger.info("Starting bot...")
