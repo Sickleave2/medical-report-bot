@@ -1,37 +1,32 @@
 # pdf_processor.py
-import fitz
+import fitz  # PyMuPDF
 import io
 import random
-import re
 from datetime import datetime
 
 class SmartPDFProcessor:
-    
     @staticmethod
     def analyze_pdf(pdf_path):
-        """تحليل الملف واستخراج أسماء الحقول وحالتها"""
-        doc = fitz.open(pdf_path)
-        fields = []
-        for page in doc:
-            for widget in page.widgets():
-                name = widget.field_name
-                value = widget.field_value
-                status = "ممتلئ" if value and str(value).strip() else "فارغ"
-                display_value = value if status == "ممتلئ" else ""
-                
-                fields.append({
-                    "name": name,
-                    "status": status,
-                    "value": display_value
-                })
-        doc.close()
-        return fields
+        """استخراج أسماء الحقول التفاعلية فقط من الملف"""
+        try:
+            doc = fitz.open(pdf_path)
+            field_names = []
+            for page in doc:
+                for widget in page.widgets():
+                    if widget.field_name:
+                        field_names.append(widget.field_name)
+            doc.close()
+            # إزالة التكرار
+            return list(dict.fromkeys(field_names))
+        except Exception as e:
+            print(f"Error in analyze_pdf: {e}")
+            return []
 
     @staticmethod
     def generate_medical_file_no():
         """توليد رقم الملف الطبي: 26 + الشهر + اليوم + 3 أرقام عشوائية"""
         now = datetime.now()
-        prefix = f"26{now.strftime('%m%d')}"  # 260226 مثلاً
+        prefix = f"26{now.strftime('%m%d')}"
         suffix = "".join([str(random.randint(0, 9)) for _ in range(3)])
         return prefix + suffix
 
