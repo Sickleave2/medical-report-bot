@@ -1,4 +1,4 @@
-# database.py (مُعدَّل ومُستقر)
+# database.py (محدث بالكامل)
 import sqlite3
 from datetime import datetime
 
@@ -11,6 +11,7 @@ def init_db():
     conn = connect()
     cursor = conn.cursor()
 
+    # جدول المناطق
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS regions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -18,15 +19,18 @@ def init_db():
     )
     """)
 
+    # جدول المستشفيات (تم إضافة حقل السعر price)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS hospitals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         region_id INTEGER,
         name TEXT,
+        price REAL DEFAULT 3.0,
         FOREIGN KEY(region_id) REFERENCES regions(id)
     )
     """)
 
+    # جدول الأقسام
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS departments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,6 +40,7 @@ def init_db():
     )
     """)
 
+    # جدول الأطباء
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS doctors (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,6 +53,17 @@ def init_db():
     )
     """)
 
+    # جدول إعدادات قوالب PDF (يحفظ الحقول التي اخترت تعبئتها ✅)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS pdf_configs (
+        doctor_id INTEGER,
+        gender TEXT,
+        field_name TEXT,
+        PRIMARY KEY(doctor_id, gender, field_name)
+    )
+    """)
+
+    # جدول المستخدمين
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,6 +76,7 @@ def init_db():
     )
     """)
 
+    # جدول المعاملات المالية
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS transactions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,6 +87,7 @@ def init_db():
     )
     """)
 
+    # جدول التقارير المنشأة
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS reports (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,29 +97,6 @@ def init_db():
         patient_gender TEXT,
         created_at TEXT,
         FOREIGN KEY(doctor_id) REFERENCES doctors(id)
-    )
-    """)
-
-    # جداول جديدة للميزات المستقبلية (لكن لن تستخدم حتى تستقر)
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS template_fields (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        doctor_id INTEGER,
-        field_name TEXT,
-        is_used INTEGER DEFAULT 1,
-        FOREIGN KEY(doctor_id) REFERENCES doctors(id),
-        UNIQUE(doctor_id, field_name)
-    )
-    """)
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS required_data (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        doctor_id INTEGER,
-        data_key TEXT,
-        is_required INTEGER DEFAULT 1,
-        FOREIGN KEY(doctor_id) REFERENCES doctors(id),
-        UNIQUE(doctor_id, data_key)
     )
     """)
 
@@ -121,7 +116,7 @@ def seed_regions():
     conn.commit()
     conn.close()
 
-# ========== المناطق ==========
+# ========== دوال المناطق ==========
 def get_regions():
     conn = connect()
     cursor = conn.cursor()
@@ -152,7 +147,7 @@ def get_region(region_id):
     conn.close()
     return row
 
-# ========== المستشفيات ==========
+# ========== دوال المستشفيات والأسعار ==========
 def get_hospitals(region_id=None):
     conn = connect()
     cursor = conn.cursor()
@@ -186,7 +181,22 @@ def get_hospital(hosp_id):
     conn.close()
     return row
 
-# ========== الأقسام ==========
+def update_hospital_price(hospital_id, new_price):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE hospitals SET price=? WHERE id=?", (new_price, hospital_id))
+    conn.commit()
+    conn.close()
+
+def get_hospital_price(hospital_id):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT price FROM hospitals WHERE id=?", (hospital_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else 3.0
+
+# ========== دوال الأقسام ==========
 def get_departments(hospital_id=None):
     conn = connect()
     cursor = conn.cursor()
@@ -220,7 +230,7 @@ def get_department(dept_id):
     conn.close()
     return row
 
-# ========== الأطباء ==========
+# ========== دوال الأطباء ==========
 def get_doctors(department_id=None):
     conn = connect()
     cursor = conn.cursor()
@@ -259,7 +269,25 @@ def delete_doctor(doctor_id):
     conn.commit()
     conn.close()
 
-# ========== المستخدمين ==========
+# ========== دوال قوالب PDF الديناميكية ==========
+def save_pdf_config(doctor_id, gender, fields_list):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM pdf_configs WHERE doctor_id=? AND gender=?", (doctor_id, gender))
+    for field in fields_list:
+        cursor.execute("INSERT INTO pdf_configs (doctor_id, gender, field_name) VALUES (?,?,?)", (doctor_id, gender, field))
+    conn.commit()
+    conn.close()
+
+def get_pdf_config(doctor_id, gender):
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT field_name FROM pdf_configs WHERE doctor_id=? AND gender=?", (doctor_id, gender))
+    rows = cursor.fetchall()
+    conn.close()
+    return [row[0] for row in rows]
+
+# ========== دوال المستخدمين ==========
 def add_user(telegram_id, username, is_admin=0):
     conn = connect()
     cursor = conn.cursor()
@@ -334,7 +362,7 @@ def get_last_transaction(telegram_id):
     conn.close()
     return tx
 
-# ========== التقارير ==========
+# ========== دوال التقارير ==========
 def save_report(telegram_id, doctor_id, patient_name, patient_gender):
     conn = connect()
     cursor = conn.cursor()
@@ -379,38 +407,3 @@ def get_report_stats():
         "top_hospital": top_hospital,
         "top_doctor": top_doctor
     }
-
-# ========== دوال القوالب الجديدة (لن تستخدم حتى استقرار البوت) ==========
-def set_template_fields(doctor_id, fields):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM template_fields WHERE doctor_id=?", (doctor_id,))
-    for f in fields:
-        cursor.execute("INSERT INTO template_fields (doctor_id, field_name, is_used) VALUES (?,?,1)", (doctor_id, f))
-    conn.commit()
-    conn.close()
-
-def get_template_fields(doctor_id):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT field_name FROM template_fields WHERE doctor_id=?", (doctor_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
-
-def set_required_data(doctor_id, data_keys):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM required_data WHERE doctor_id=?", (doctor_id,))
-    for key in data_keys:
-        cursor.execute("INSERT INTO required_data (doctor_id, data_key, is_required) VALUES (?,?,1)", (doctor_id, key))
-    conn.commit()
-    conn.close()
-
-def get_required_data(doctor_id):
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT data_key FROM required_data WHERE doctor_id=?", (doctor_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
