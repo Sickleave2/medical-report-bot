@@ -1,5 +1,5 @@
 aiogram==2.25.1
-PyMuPDF
+pymupdf
 hijri-converter
 python-dateutil
 unidecode
