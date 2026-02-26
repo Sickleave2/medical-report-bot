@@ -1,5 +1,6 @@
+# requirements.txt
 aiogram==2.25.1
-pymupdf
+PyMuPDF
 hijri-converter
 python-dateutil
 unidecode
