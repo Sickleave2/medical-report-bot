@@ -44,7 +44,7 @@ class SmartPDFProcessor:
                 if field_name in selected_fields:
                     field_name_lower = field_name.lower()
                     
-                    # الربط الذكي: البوت يطابق اسم الحقل البرمجي بنوع البيانات
+                    # الربط الذكي
                     if "name" in field_name_lower or "اسم" in field_name_lower:
                         widget.field_value = user_data.get("patient_name", "")
                         
@@ -65,7 +65,6 @@ class SmartPDFProcessor:
                     
                     widget.update()
                     
-        # حفظ الملف في الذاكرة لتصديره مباشرة
         output = io.BytesIO()
         doc.save(output)
         doc.close()
