@@ -53,7 +53,7 @@ def init_db():
     )
     """)
 
-    # جدول إعدادات قوالب PDF (يحفظ الحقول التي اخترت تعبئتها ✅)
+    # جدول إعدادات قوالب PDF
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS pdf_configs (
         doctor_id INTEGER,
@@ -269,6 +269,17 @@ def delete_doctor(doctor_id):
     conn.commit()
     conn.close()
 
+def update_doctor_pdf(doctor_id, gender, pdf_path):
+    """تحديث مسار PDF لطبيب بناءً على الجنس (ذكر/أنثى)"""
+    conn = connect()
+    cursor = conn.cursor()
+    if gender == "ذكر":
+        cursor.execute("UPDATE doctors SET pdf_male = ? WHERE id = ?", (pdf_path, doctor_id))
+    else:
+        cursor.execute("UPDATE doctors SET pdf_female = ? WHERE id = ?", (pdf_path, doctor_id))
+    conn.commit()
+    conn.close()
+
 # ========== دوال قوالب PDF الديناميكية ==========
 def save_pdf_config(doctor_id, gender, fields_list):
     conn = connect()
@@ -406,4 +417,4 @@ def get_report_stats():
         "total_income": total_income,
         "top_hospital": top_hospital,
         "top_doctor": top_doctor
-    }
+        }
