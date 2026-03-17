@@ -1,4 +1,4 @@
-# bot.py (النسخة النهائية مع تحسينات التنقل وتعبئة PDF وإضافة رفع القوالب)
+# bot.py (النسخة النهائية مع إصلاح خطأ wait_male_config)
 import logging
 import os
 import io
@@ -1724,7 +1724,7 @@ async def upload_template_file(message: types.Message, state: FSMContext):
     await UploadTemplate.confirm_fields.set()
 
 # ========== معالجات اختيار الحقول (toggle / save) ==========
-@dp.callback_query_handler(lambda c: c.data.startswith('toggle_'), state=[AddDoctor.wait_male_config, AddDoctor.wait_female_config, UploadTemplate.confirm_fields])
+@dp.callback_query_handler(lambda c: c.data.startswith('toggle_'), state=UploadTemplate.confirm_fields)
 async def toggle_field(callback_query: types.CallbackQuery, state: FSMContext):
     parts = callback_query.data.split('_', 2)
     if len(parts) < 3:
@@ -1732,41 +1732,17 @@ async def toggle_field(callback_query: types.CallbackQuery, state: FSMContext):
         return
     _, gender_code, field_name = parts  # gender_code = 'male' أو 'female'
     data = await state.get_data()
-    current_state = await state.get_state()
-
-    if current_state in (AddDoctor.wait_male_config.state, AddDoctor.wait_female_config.state):
-        # حالة إضافة طبيب قديم (قد لا تستخدم الآن)
-        if gender_code == "male":
-            selected = data.get("male_selected", [])
-            if field_name in selected:
-                selected.remove(field_name)
-            else:
-                selected.append(field_name)
-            await state.update_data(male_selected=selected)
-            keyboard = get_fields_keyboard(data["male_fields"], selected, "male")
-        else:
-            selected = data.get("female_selected", [])
-            if field_name in selected:
-                selected.remove(field_name)
-            else:
-                selected.append(field_name)
-            await state.update_data(female_selected=selected)
-            keyboard = get_fields_keyboard(data["female_fields"], selected, "female")
-        await callback_query.message.edit_reply_markup(reply_markup=keyboard)
-
-    elif current_state == UploadTemplate.confirm_fields.state:
-        selected = data.get("selected_fields", [])
-        if field_name in selected:
-            selected.remove(field_name)
-        else:
-            selected.append(field_name)
-        await state.update_data(selected_fields=selected)
-        keyboard = get_fields_keyboard(data["fields"], selected, gender_code)
-        await callback_query.message.edit_reply_markup(reply_markup=keyboard)
-
+    selected = data.get("selected_fields", [])
+    if field_name in selected:
+        selected.remove(field_name)
+    else:
+        selected.append(field_name)
+    await state.update_data(selected_fields=selected)
+    keyboard = get_fields_keyboard(data["fields"], selected, gender_code)
+    await callback_query.message.edit_reply_markup(reply_markup=keyboard)
     await callback_query.answer()
 
-@dp.callback_query_handler(lambda c: c.data.startswith('save_'), state=[AddDoctor.wait_male_config, AddDoctor.wait_female_config, UploadTemplate.confirm_fields])
+@dp.callback_query_handler(lambda c: c.data.startswith('save_'), state=UploadTemplate.confirm_fields)
 async def save_fields(callback_query: types.CallbackQuery, state: FSMContext):
     parts = callback_query.data.split('_')
     if len(parts) != 2:
@@ -1774,36 +1750,15 @@ async def save_fields(callback_query: types.CallbackQuery, state: FSMContext):
         return
     gender_code = parts[1]  # 'male' أو 'female'
     data = await state.get_data()
-    current_state = await state.get_state()
-
-    if current_state in (AddDoctor.wait_male_config.state, AddDoctor.wait_female_config.state):
-        # إضافة طبيب قديم
-        doctor_id = data["doctor_id"]
-        if gender_code == "male":
-            selected = data.get("male_selected", [])
-            database.save_pdf_config(doctor_id, "male", selected)
-            await callback_query.message.edit_text("✅ تم حفظ إعدادات ملف الذكور. الآن اختر الحقول لملف الإناث:")
-            await callback_query.message.edit_reply_markup(
-                reply_markup=get_fields_keyboard(data["female_fields"], data.get("female_selected", []), "female")
-            )
-            await AddDoctor.wait_female_config.set()
-        else:
-            selected = data.get("female_selected", [])
-            database.save_pdf_config(doctor_id, "female", selected)
-            await callback_query.message.edit_text(f"✅ تم إضافة الطبيب '{data['name']}' بنجاح مع الحقول المحددة.")
-            await state.finish()
-
-    elif current_state == UploadTemplate.confirm_fields.state:
-        doctor_id = data["doctor_id"]
-        gender_ar = "ذكر" if gender_code == "male" else "أنثى"
-        selected = data.get("selected_fields", [])
-        # حفظ التكوين
-        database.save_pdf_config(doctor_id, gender_ar, selected)
-        # تحديث مسار PDF
-        database.update_doctor_pdf(doctor_id, gender_ar, data["pdf_path"])
-        await callback_query.message.edit_text(f"✅ تم رفع القالب للطبيب ({gender_ar}) بنجاح.")
-        await state.finish()
-
+    doctor_id = data["doctor_id"]
+    gender_ar = "ذكر" if gender_code == "male" else "أنثى"
+    selected = data.get("selected_fields", [])
+    # حفظ التكوين
+    database.save_pdf_config(doctor_id, gender_ar, selected)
+    # تحديث مسار PDF
+    database.update_doctor_pdf(doctor_id, gender_ar, data["pdf_path"])
+    await callback_query.message.edit_text(f"✅ تم رفع القالب للطبيب ({gender_ar}) بنجاح.")
+    await state.finish()
     await callback_query.answer()
 
 # ========== الإحصائيات ==========
