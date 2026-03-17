@@ -89,9 +89,8 @@ def is_admin_user(user_id):
     # المطور دائماً Admin
     if is_developer(user_id):
         return True
-    # التحقق من جدول admins (سيتم إضافته لاحقاً، لكننا سنستخدم دالة وهمية الآن)
-    # return database.is_admin(user_id)  # عند إضافة جدول المشرفين
-    return False  # مؤقتاً حتى نضيف جدول المشرفين
+    # التحقق من جدول admins
+    return database.is_admin(user_id)
 
 # ========== لوحات المفاتيح ==========
 def main_keyboard(is_admin=False):
