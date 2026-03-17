@@ -1,4 +1,4 @@
-# database.py (مع إضافة دوال pdf_configs)
+# database.py (مع إضافة جدول المشرفين)
 import sqlite3
 from datetime import datetime
 
@@ -97,6 +97,15 @@ def init_db():
         patient_gender TEXT,
         created_at TEXT,
         FOREIGN KEY(doctor_id) REFERENCES doctors(id)
+    )
+    """)
+
+    # ===== جدول المشرفين (جديد) =====
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS admins (
+        user_id INTEGER PRIMARY KEY,
+        added_by INTEGER,
+        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """)
 
@@ -417,4 +426,41 @@ def get_report_stats():
         "total_income": total_income,
         "top_hospital": top_hospital,
         "top_doctor": top_doctor
-        }
+    }
+
+# ========== دوال إدارة المشرفين (جديدة) ==========
+def add_admin(user_id, added_by):
+    conn = connect()
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO admins (user_id, added_by) VALUES (?, ?)", (user_id, added_by))
+    conn.commit()
+    conn.close()
+
+def remove_admin(user_id):
+    conn = connect()
+    c = conn.cursor()
+    c.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def is_admin(user_id):
+    # المطور دائماً Admin
+    import os
+    if str(user_id) == os.getenv("ADMIN_ID"):
+        return True
+    conn = connect()
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM admins WHERE user_id = ?", (user_id,))
+    result = c.fetchone()
+    conn.close()
+    return result is not None
+
+def get_all_admins():
+    conn = connect()
+    c = conn.cursor()
+    c.execute('''SELECT a.user_id, u.username, a.added_at, a.added_by 
+                 FROM admins a
+                 LEFT JOIN users u ON a.user_id = u.user_id''')
+    admins = c.fetchall()
+    conn.close()
+    return admins
