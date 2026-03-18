@@ -244,6 +244,14 @@ class AddDoctor(StatesGroup):
 class DeleteDoctor(StatesGroup):
     choose = State()
 
+class AddAdmin(StatesGroup):
+    user_id = State()
+    confirm = State()
+
+class RemoveAdmin(StatesGroup):
+    choose = State()
+    confirm = State()
+
 class UploadTemplate(StatesGroup):
     choose_region = State()
     choose_hospital = State()
@@ -284,7 +292,7 @@ class Broadcast(StatesGroup):
 class PriceManagement(StatesGroup):
     choose_hospital = State()
     new_price = State()
-
+    
 # ========== معالج الأخطاء العام ==========
 @dp.errors_handler()
 async def errors_handler(update, exception):
@@ -1885,6 +1893,138 @@ async def broadcast_confirm(message: types.Message, state: FSMContext):
         await message.answer(f"✅ تم الإرسال إلى {count} مستخدم.", reply_markup=admin_keyboard(message.from_user.id))
     else:
         await message.answer("❌ تم إلغاء العملية.", reply_markup=admin_keyboard(message.from_user.id))
+    await state.finish()
+    
+# ========== إدارة المشرفين ==========
+@dp.message_handler(lambda m: m.text == "👥 إدارة المشرفين")
+async def manage_admins_menu(message: types.Message):
+    if not is_developer(message.from_user.id):
+        return
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("👥 عرض المشرفين", "➕ إضافة مشرف", "🗑 حذف مشرف")
+    kb.add("🔙 رجوع")
+    await message.answer("إدارة المشرفين:", reply_markup=kb)
+
+@dp.message_handler(lambda m: m.text == "👥 عرض المشرفين")
+async def list_admins(message: types.Message):
+    if not is_developer(message.from_user.id):
+        return
+    admins = database.get_all_admins()
+    if not admins:
+        await message.answer("لا يوجد مشرفين حالياً.", reply_markup=admin_keyboard(message.from_user.id))
+        return
+    text = "📋 قائمة المشرفين:\n\n"
+    for admin in admins:
+        user_id, username, added_at, added_by = admin
+        text += f"🆔 {user_id}\n"
+        text += f"👤 {username if username else '—'}\n"
+        text += f"📅 أضيف في: {added_at}\n"
+        text += f"➕ بواسطة: {added_by}\n\n"
+    await message.answer(text, reply_markup=admin_keyboard(message.from_user.id))
+
+@dp.message_handler(lambda m: m.text == "➕ إضافة مشرف")
+async def add_admin_start(message: types.Message):
+    if not is_developer(message.from_user.id):
+        return
+    await message.answer("أرسل آيدي المستخدم الذي تريد جعله مشرفاً:", reply_markup=cancel_keyboard())
+    await AddAdmin.user_id.set()
+
+@dp.message_handler(state=AddAdmin.user_id)
+async def add_admin_get_id(message: types.Message, state: FSMContext):
+    if message.text == "🏠 الرئيسية":
+        await go_to_main(message, state)
+        return
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    if not message.text.isdigit():
+        await message.answer("❌ آيدي غير صحيح.")
+        return
+    user_id = int(message.text)
+    user = database.get_user(user_id)
+    if not user:
+        await message.answer("❌ هذا المستخدم غير مسجل في البوت.")
+        return
+    if is_developer(user_id):
+        await message.answer("❌ هذا المستخدم هو المطور الأساسي.")
+        return
+    if database.is_admin(user_id):
+        await message.answer("❌ هذا المستخدم مشرف بالفعل.")
+        return
+    await state.update_data(target_user_id=user_id, target_username=user[2])
+    await message.answer(f"هل أنت متأكد من إضافة {user[2]} (آيدي: {user_id}) كمشرف؟", reply_markup=yes_no_keyboard())
+    await AddAdmin.confirm.set()
+
+@dp.message_handler(state=AddAdmin.confirm)
+async def add_admin_confirm(message: types.Message, state: FSMContext):
+    if message.text == "🏠 الرئيسية":
+        await go_to_main(message, state)
+        return
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    if message.text == "✅ نعم":
+        data = await state.get_data()
+        database.add_admin(data["target_user_id"], message.from_user.id)
+        await message.answer(f"✅ تمت إضافة {data['target_username']} كمشرف بنجاح.", reply_markup=admin_keyboard(message.from_user.id))
+        try:
+            await bot.send_message(data["target_user_id"], "🎉 لقد تمت ترقيتك إلى مشرف في البوت. الآن يمكنك استخدام لوحة التحكم.")
+        except:
+            pass
+    else:
+        await message.answer("❌ تم الإلغاء.", reply_markup=admin_keyboard(message.from_user.id))
+    await state.finish()
+
+@dp.message_handler(lambda m: m.text == "🗑 حذف مشرف")
+async def remove_admin_start(message: types.Message):
+    if not is_developer(message.from_user.id):
+        return
+    admins = database.get_all_admins()
+    if not admins:
+        await message.answer("لا يوجد مشرفين حالياً.", reply_markup=admin_keyboard(message.from_user.id))
+        return
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    for admin in admins:
+        username = admin[1] if admin[1] else f"آيدي {admin[0]}"
+        kb.add(f"🗑 {username} (ID: {admin[0]})")
+    kb.add("🔙 رجوع")
+    await message.answer("اختر المشرف الذي تريد حذفه:", reply_markup=kb)
+    await RemoveAdmin.choose.set()
+
+@dp.message_handler(state=RemoveAdmin.choose)
+async def remove_admin_choose(message: types.Message, state: FSMContext):
+    if message.text == "🔙 رجوع":
+        await manage_admins_menu(message)
+        await state.finish()
+        return
+    import re
+    match = re.search(r'ID: (\d+)', message.text)
+    if not match:
+        await message.answer("❌ اختيار غير صحيح.")
+        return
+    user_id = int(match.group(1))
+    await state.update_data(target_user_id=user_id)
+    await message.answer(f"هل أنت متأكد من حذف المشرف (آيدي: {user_id})؟", reply_markup=yes_no_keyboard())
+    await RemoveAdmin.confirm.set()
+
+@dp.message_handler(state=RemoveAdmin.confirm)
+async def remove_admin_confirm(message: types.Message, state: FSMContext):
+    if message.text == "🏠 الرئيسية":
+        await go_to_main(message, state)
+        return
+    if message.text == "❌ إلغاء العملية":
+        await cancel_operation(message, state)
+        return
+    if message.text == "✅ نعم":
+        data = await state.get_data()
+        database.remove_admin(data["target_user_id"])
+        await message.answer("✅ تم حذف المشرف بنجاح.", reply_markup=admin_keyboard(message.from_user.id))
+        try:
+            await bot.send_message(data["target_user_id"], "تم إلغاء صلاحية المشرف عن حسابك.")
+        except:
+            pass
+    else:
+        await message.answer("❌ تم الإلغاء.", reply_markup=admin_keyboard(message.from_user.id))
     await state.finish()
 
 # ========== العودة للقائمة الرئيسية ==========
